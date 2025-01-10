@@ -58,8 +58,10 @@ func TestTrackerAnnounce(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, 2, len(gotPeers))
 	assert.Equal(t, []peers.Peer{{
-		SocketAddress: "127.0.0.1:6881",
+		IP:   []byte{127, 0, 0, 1},
+		Port: 6881,
 	}, {
-		SocketAddress: "192.168.0.10:6969",
+		IP:   []byte{192, 168, 0, 10},
+		Port: 6969,
 	}}, gotPeers)
 }

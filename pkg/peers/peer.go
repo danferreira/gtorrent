@@ -4,11 +4,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
-	"strconv"
 )
 
 type Peer struct {
-	SocketAddress string
+	IP   net.IP
+	Port uint16
 }
 
 func Unmarshal(buf []byte) (Peer, error) {
@@ -16,12 +16,8 @@ func Unmarshal(buf []byte) (Peer, error) {
 		return Peer{}, errors.New("invalid peer address")
 	}
 
-	ip := net.IP(buf[:4])
-	port := binary.BigEndian.Uint16(buf[4:])
-
-	socketAddress := net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
-
 	return Peer{
-		SocketAddress: socketAddress,
+		IP:   net.IP(buf[:4]),
+		Port: binary.BigEndian.Uint16(buf[4:]),
 	}, nil
 }

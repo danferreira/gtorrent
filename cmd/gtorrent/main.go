@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/danferreira/gtorrent/pkg/metadata"
+	"github.com/danferreira/gtorrent/pkg/torrent"
 )
 
 func main() {
@@ -18,5 +19,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("Announce url: %s", m.Announce)
+	t := torrent.Torrent{
+		Metadata: m,
+	}
+
+	err = t.Download()
+
+	if err != nil {
+		fmt.Print(err)
+	}
 }
