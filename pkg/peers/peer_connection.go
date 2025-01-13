@@ -2,26 +2,32 @@ package peers
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"time"
+
+	"github.com/danferreira/gtorrent/pkg/handshake"
+	"github.com/danferreira/gtorrent/pkg/message"
 )
 
 type PeerConnection struct {
-	Peer     Peer
+	Peer     *Peer
 	InfoHash [20]byte
 	PeerID   [20]byte
+	Choked   bool
 }
 
 func (pc *PeerConnection) Connect() error {
-	addr := net.JoinHostPort(pc.Peer.IP.String(), strconv.Itoa(int(pc.Peer.Port)))
+	addr := pc.Peer.Addr()
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
-		fmt.Println("Error:", err)
+		fmt.Println("Error: ", err)
 		return err
 	}
+
+	fmt.Println("Peer connected: ", addr)
 
 	defer conn.Close()
 
@@ -35,19 +41,24 @@ func (pc *PeerConnection) Connect() error {
 		return err
 	}
 
-	return nil
+	for {
+		msg, err := message.Read(conn)
+		if err != nil {
+			return err
+		}
+		pc.handleMessage(msg)
+	}
 }
 
 func (pc *PeerConnection) sendHandshake(conn io.Writer) error {
-	h := Handshake{
+	h := handshake.Handshake{
 		InfoHash: pc.InfoHash,
 		PeerID:   pc.PeerID,
 	}
 
-	_, err := conn.Write(h.Serialize())
+	err := h.Write(conn)
 
 	if err != nil {
-		fmt.Println("Error: ", err)
 		return err
 	}
 
@@ -55,47 +66,49 @@ func (pc *PeerConnection) sendHandshake(conn io.Writer) error {
 }
 
 func (pc *PeerConnection) receiveHandshake(conn io.Reader) error {
-	buf := make([]byte, 1)
-
-	_, err := io.ReadFull(conn, buf)
+	h, err := handshake.Read(conn)
 
 	if err != nil {
-		fmt.Println("Error: ", err)
 		return err
 	}
 
-	if int(buf[0]) != 19 {
-		fmt.Println("Invalid protocol length in handshake")
-		return nil
-	}
-
-	buf = make([]byte, 19)
-	_, err = io.ReadFull(conn, buf)
-	if err != nil {
-		fmt.Println("Error: ", err)
-		return err
-	}
-
-	if string(buf) != ProtocolIdentifier {
-		fmt.Println("Invalid protocol identifier in handshake")
-		return err
-	}
-
-	_, err = io.CopyN(io.Discard, conn, 8)
-	if err != nil {
-		fmt.Println("Error: ", err)
-		return err
-	}
-
-	var infoHash, peerID [20]byte
-
-	io.ReadFull(conn, infoHash[:])
-	io.ReadFull(conn, peerID[:])
-
-	if !bytes.Equal(pc.InfoHash[:], infoHash[:]) {
-		fmt.Println("InfoHash received on handshake is different")
-		return nil
+	if !bytes.Equal(pc.InfoHash[:], h.InfoHash[:]) {
+		return errors.New("infoHash received on handshake is different")
 	}
 
 	return nil
+}
+
+func (pc *PeerConnection) handleMessage(m *message.Message) {
+	if m == nil {
+		fmt.Println("Keep Alive")
+		return
+	}
+	switch m.MessageID {
+	case message.MessageChoke:
+		fmt.Println("Peer Choked us")
+		pc.Choked = true
+	case message.MessageUnchoke:
+		fmt.Println("Peer Unchoked us")
+		pc.Choked = false
+		pc.sendMessage(message.MessageInterested)
+	case message.MessageNotInterest:
+		fmt.Println("Peer is not interested in us")
+	case message.MessageHave:
+		fmt.Println("Peer have a piece")
+	case message.MessageBitfield:
+		fmt.Println("Peer sent bitfield")
+	case message.MessageRequest:
+		fmt.Println("Peer ask for a piece")
+	case message.MessagePiece:
+		fmt.Println("Peer sent a piece")
+	case message.MessageCancel:
+		fmt.Println("Peer wants to cancel")
+	default:
+		fmt.Printf("MessageID: %d Not implemented yet", m.MessageID)
+	}
+}
+
+func (pc *PeerConnection) sendMessage(mt message.MessageID) {
+
 }

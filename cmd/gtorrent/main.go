@@ -18,9 +18,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	var peerID [20]byte
+	copy(peerID[:], "-GT0001-abcdefgh1234")
 
 	t := torrent.Torrent{
 		Metadata: m,
+		PeerID:   peerID,
 	}
 
 	err = t.Download()

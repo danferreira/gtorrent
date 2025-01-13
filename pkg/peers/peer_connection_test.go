@@ -52,7 +52,7 @@ func TestConnect(t *testing.T) {
 	}
 
 	pc := PeerConnection{
-		Peer:     peer,
+		Peer:     &peer,
 		InfoHash: InfoHash,
 		PeerID:   PeerID,
 	}

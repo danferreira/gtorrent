@@ -20,8 +20,6 @@ type fakeTrackerResp struct {
 func TestTrackerAnnounce(t *testing.T) {
 	fakeResp := fakeTrackerResp{
 		Interval: 1800,
-		// "peers" are in “compact” form: 6 bytes (4 for IP, 2 for port) per peer
-		// e.g., 127.0.0.1:6881 -> 0x7F 0x00 0x00 0x01 0x1A 0xE1
 		Peers: string([]byte{
 			127, 0, 0, 1, 0x1A, 0xE1, // 127.0.0.1:6881
 			192, 168, 0, 10, 0x1B, 0x39, // 192.168.0.10:6969
@@ -50,12 +48,13 @@ func TestTrackerAnnounce(t *testing.T) {
 
 	tr := Tracker{
 		Metadata: testMetadata,
-		PeerID:   "-GT0001-abcdefgh1234",
+		PeerID:   [20]byte{1, 2, 3, 4},
 	}
 
-	gotPeers, err := tr.Announce(Started)
+	gotPeers, interval, err := tr.Announce(Started)
 
 	assert.Nil(t, err)
+	assert.Equal(t, 1800, interval)
 	assert.Equal(t, 2, len(gotPeers))
 	assert.Equal(t, []peers.Peer{{
 		IP:   []byte{127, 0, 0, 1},

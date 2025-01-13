@@ -40,10 +40,15 @@ type TrackerResp struct {
 
 type Tracker struct {
 	Metadata metadata.Metadata
-	PeerID   string
+	PeerID   [20]byte
 }
 
-func (t *Tracker) Announce(e TrackerEvent) ([]peer.Peer, error) {
+type TrackerResponse struct {
+	Peers    []peer.Peer
+	Interval uint
+}
+
+func (t *Tracker) Announce(e TrackerEvent) ([]peer.Peer, int, error) {
 	params := url.Values{
 		"info_hash":  []string{string(t.Metadata.Info.InfoHash[:])},
 		"peer_id":    []string{string(t.PeerID[:])},
@@ -60,7 +65,7 @@ func (t *Tracker) Announce(e TrackerEvent) ([]peer.Peer, error) {
 	c := &http.Client{Timeout: 15 * time.Second}
 	resp, err := c.Get(url.String())
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	defer resp.Body.Close()
@@ -68,7 +73,7 @@ func (t *Tracker) Announce(e TrackerEvent) ([]peer.Peer, error) {
 	trackerResp := TrackerResp{}
 	err = bencode.Unmarshal(resp.Body, &trackerResp)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	peersResp := []byte(trackerResp.Peers)
@@ -84,5 +89,5 @@ func (t *Tracker) Announce(e TrackerEvent) ([]peer.Peer, error) {
 		peers = append(peers, peerv)
 	}
 
-	return peers, nil
+	return peers, trackerResp.Interval, nil
 }
