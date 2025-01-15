@@ -21,8 +21,21 @@ const (
 )
 
 type Message struct {
-	MessageID MessageID
-	Payload   []byte
+	ID      MessageID
+	Payload []byte
+}
+
+func (m *Message) Serialize() []byte {
+	if m == nil {
+		return make([]byte, 4)
+	}
+
+	length := uint32(len(m.Payload) + 1) // +1 for id
+	buf := make([]byte, 4+length)
+	binary.BigEndian.PutUint32(buf[0:4], length)
+	buf[4] = byte(m.ID)
+	copy(buf[5:], m.Payload)
+	return buf
 }
 
 func Read(reader io.Reader) (*Message, error) {
@@ -47,7 +60,19 @@ func Read(reader io.Reader) (*Message, error) {
 	}
 
 	return &Message{
-		MessageID: MessageID(payload[0]),
-		Payload:   payload[1:],
+		ID:      MessageID(payload[0]),
+		Payload: payload[1:],
 	}, nil
+}
+
+func NewRequest(index int, begin int, length int) Message {
+	buff := make([]byte, 12)
+	binary.BigEndian.PutUint32(buff, uint32(index))
+	binary.BigEndian.PutUint32(buff, uint32(begin))
+	binary.BigEndian.PutUint32(buff, uint32(length))
+
+	return Message{
+		ID:      MessageRequest,
+		Payload: buff,
+	}
 }

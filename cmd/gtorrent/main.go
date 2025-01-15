@@ -22,7 +22,7 @@ func main() {
 	copy(peerID[:], "-GT0001-abcdefgh1234")
 
 	t := torrent.Torrent{
-		Metadata: m,
+		Metadata: *m,
 		PeerID:   peerID,
 	}
 

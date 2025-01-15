@@ -54,10 +54,10 @@ func (info *TorrentFileInfo) hash() ([20]byte, error) {
 	return sha1.Sum(buf.Bytes()), nil
 }
 
-func Parse(path string) (Metadata, error) {
+func Parse(path string) (*Metadata, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return Metadata{}, err
+		return nil, err
 	}
 	defer file.Close()
 
@@ -65,13 +65,13 @@ func Parse(path string) (Metadata, error) {
 	err = bencode.Unmarshal(file, &tf)
 
 	if err != nil {
-		return Metadata{}, err
+		return nil, err
 	}
 
 	announceUrl, err := url.Parse(tf.Announce)
 
 	if err != nil {
-		return Metadata{}, err
+		return nil, err
 	}
 
 	var files []FileInfo
@@ -107,10 +107,10 @@ func Parse(path string) (Metadata, error) {
 	infoHash, err := tf.Info.hash()
 
 	if err != nil {
-		return Metadata{}, err
+		return nil, err
 	}
 
-	return Metadata{
+	return &Metadata{
 		Announce: announceUrl,
 		Info: MetadataInfo{
 			Name:        tf.Info.Name,

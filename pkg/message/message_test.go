@@ -13,7 +13,7 @@ func TestRead(t *testing.T) {
 		output     *Message
 		shouldFail bool
 	}{
-		"pass message":                {[]byte{0, 0, 0, 5, 5, 1, 2, 3, 4}, &Message{MessageID: 5, Payload: []byte{1, 2, 3, 4}}, false},
+		"pass message":                {[]byte{0, 0, 0, 5, 5, 1, 2, 3, 4}, &Message{ID: 5, Payload: []byte{1, 2, 3, 4}}, false},
 		"keep alive message":          {[]byte{0, 0, 0, 0}, nil, false},
 		"mal constructed buffer":      {[]byte{0}, nil, true},
 		"buffer too short for length": {[]byte{0, 0, 0, 5, 4, 1, 2}, nil, true},
