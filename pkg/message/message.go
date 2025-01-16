@@ -44,6 +44,7 @@ func Read(reader io.Reader) (*Message, error) {
 	if err != nil {
 		return nil, fmt.Errorf("buffer is too short: %w", err)
 	}
+
 	length := binary.BigEndian.Uint32(msgLen)
 
 	if length == 0 {
@@ -68,11 +69,19 @@ func Read(reader io.Reader) (*Message, error) {
 func NewRequest(index int, begin int, length int) Message {
 	buff := make([]byte, 12)
 	binary.BigEndian.PutUint32(buff, uint32(index))
-	binary.BigEndian.PutUint32(buff, uint32(begin))
-	binary.BigEndian.PutUint32(buff, uint32(length))
+	binary.BigEndian.PutUint32(buff[4:], uint32(begin))
+	binary.BigEndian.PutUint32(buff[8:], uint32(length))
 
 	return Message{
 		ID:      MessageRequest,
 		Payload: buff,
 	}
+}
+
+func (m *Message) AsPiece() (uint32, []byte) {
+	_ = binary.BigEndian.Uint32(m.Payload[0:4])
+	begin := binary.BigEndian.Uint32(m.Payload[4:8])
+	data := m.Payload[8:]
+
+	return begin, data
 }

@@ -57,6 +57,8 @@ func TestConnect(t *testing.T) {
 		PeerID:   PeerID,
 	}
 
-	err = pc.Connect()
+	doneChan := make(chan bool)
+
+	err = pc.Connect(doneChan)
 	assert.Nil(t, err)
 }

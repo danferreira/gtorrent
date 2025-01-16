@@ -12,26 +12,14 @@ import (
 	"github.com/jackpal/bencode-go"
 )
 
-type TrackerEvent uint8
+type Event string
 
 const (
-	Started TrackerEvent = iota
-	Stopped
-	Completed
+	EventStarted   Event = "started"
+	EventCompleted Event = "completed"
+	EventStopped   Event = "stopped"
+	EventUpdated   Event = ""
 )
-
-func (e TrackerEvent) String() string {
-	switch e {
-	case Started:
-		return "started"
-	case Stopped:
-		return "stopped"
-	case Completed:
-		return "completed"
-	}
-
-	return ""
-}
 
 type TrackerResp struct {
 	Interval int
@@ -48,17 +36,21 @@ type TrackerResponse struct {
 	Interval uint
 }
 
-func (t *Tracker) Announce(e TrackerEvent) ([]peer.Peer, int, error) {
+func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
 	params := url.Values{
 		"info_hash":  []string{string(t.Metadata.Info.InfoHash[:])},
 		"peer_id":    []string{string(t.PeerID[:])},
 		"port":       []string{strconv.Itoa(6881)},
-		"uploaded":   []string{"0"},
-		"downloaded": []string{"0"},
+		"downloaded": []string{string(downloaded)},
+		"uploaded":   []string{string(uploaded)},
+		"left":       []string{string(left)},
 		"compact":    []string{"1"},
-		"left":       []string{strconv.Itoa(t.Metadata.Info.TotalLength())},
-		"event":      []string{e.String()},
 	}
+
+	if e != EventUpdated {
+		params.Add("event", string(e))
+	}
+
 	url := t.Metadata.Announce
 	url.RawQuery = params.Encode()
 

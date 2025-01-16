@@ -51,7 +51,7 @@ func TestTrackerAnnounce(t *testing.T) {
 		PeerID:   [20]byte{1, 2, 3, 4},
 	}
 
-	gotPeers, interval, err := tr.Announce(Started)
+	gotPeers, interval, err := tr.Announce(EventStarted, 0, 0, 0)
 
 	assert.Nil(t, err)
 	assert.Equal(t, 1800, interval)
