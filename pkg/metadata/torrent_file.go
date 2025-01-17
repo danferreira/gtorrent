@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -78,8 +79,9 @@ func Parse(path string) (*Metadata, error) {
 
 	if len(tf.Info.Files) > 0 {
 		for _, file := range tf.Info.Files {
+			path := filepath.Join(tf.Info.Name, strings.Join(file.Path, "/"))
 			fileInfo := FileInfo{
-				Path:   strings.Join(file.Path, "/"),
+				Path:   path,
 				Length: file.Length,
 			}
 

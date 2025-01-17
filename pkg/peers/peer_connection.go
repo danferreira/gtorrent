@@ -89,7 +89,6 @@ outerLoop:
 
 			nRequests--
 			if len(data) == numBlocks {
-				fmt.Println("Finished")
 				keys := make([]int, 0, len(data))
 				for k := range data {
 					keys = append(keys, k)
@@ -193,7 +192,6 @@ func (pc *PeerConnection) handleMessage(m *message.Message, results chan block) 
 	case message.MessageRequest:
 		fmt.Println("Peer ask for a piece")
 	case message.MessagePiece:
-		fmt.Println("Peer sent a block")
 		offset, data := m.AsPiece()
 		results <- block{
 			offset: int(offset),

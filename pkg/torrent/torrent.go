@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"fmt"
-	"maps"
-	"os"
-	"slices"
 	"time"
 
 	"github.com/danferreira/gtorrent/pkg/metadata"
 	"github.com/danferreira/gtorrent/pkg/peers"
 	"github.com/danferreira/gtorrent/pkg/pieces"
+	"github.com/danferreira/gtorrent/pkg/storage"
 	"github.com/danferreira/gtorrent/pkg/tracker"
 )
 
@@ -39,6 +37,7 @@ type Torrent struct {
 	Stats          *pieces.TorrentStats
 	PeerID         [20]byte
 	ConnectedPeers map[string]struct{}
+	Storage        *storage.Storage
 }
 
 func (t *Torrent) Download() error {
@@ -46,6 +45,11 @@ func (t *Torrent) Download() error {
 	pieceLength := t.Metadata.Info.PieceLength
 	torrentSize := t.Metadata.Info.TotalLength()
 	piecesChan := make(chan *pieces.PieceWork, len(pieceHashes))
+	storage, err := storage.NewStorage(t.Metadata.Info.Files)
+	if err != nil {
+		return err
+	}
+	t.Storage = storage
 
 	t.Stats = &pieces.TorrentStats{
 		Downloaded: 0,
@@ -53,6 +57,7 @@ func (t *Torrent) Download() error {
 		Left:       int64(torrentSize),
 	}
 
+	fmt.Println("Checking files on disk...")
 	for index, ph := range pieceHashes {
 		begin := index * pieceLength
 		end := begin + pieceLength
@@ -62,6 +67,13 @@ func (t *Torrent) Download() error {
 		}
 
 		actualPieceLength := end - begin
+
+		data, err := storage.Read(begin, actualPieceLength)
+		if err != nil {
+			fmt.Println("Disk check error: ", err)
+		} else if t.checkIntegrity(ph, data) {
+			continue
+		}
 
 		piecesChan <- &pieces.PieceWork{Index: index, Hash: ph, Length: actualPieceLength}
 	}
@@ -77,7 +89,7 @@ func (t *Torrent) Download() error {
 
 	go t.announceWorker(peersChan, announceChan)
 
-	data := make(map[int][]byte)
+	piecesDownloaded := 0
 
 	for {
 		select {
@@ -98,11 +110,13 @@ func (t *Torrent) Download() error {
 					continue
 				}
 
-				data[event.Piece.Index] = event.Piece.Data
+				start := event.Piece.Index * pieceLength
+				t.Storage.Write(start, event.Piece.Data)
 				t.Stats.UpdateDownloaded(int64(len(event.Piece.Data)))
 
-				if len(data) == len(t.Metadata.Info.Pieces) {
-					t.saveFile(data)
+				piecesDownloaded++
+				if piecesDownloaded == len(pieceHashes) {
+					t.Storage.CloseFiles()
 					announceChan <- tracker.EventCompleted
 				}
 
@@ -120,36 +134,14 @@ func (t *Torrent) Download() error {
 		}
 	}
 }
-func (t *Torrent) saveFile(data map[int][]byte) {
-	fmt.Println("Saving file")
-	keys := slices.Sorted(maps.Keys(data))
 
-	var buf []byte
-	for _, k := range keys {
-		buf = append(buf, data[k]...)
-	}
-
-	fo, err := os.Create("output.txt")
-	if err != nil {
-		panic(err)
-	}
-	// close fo on exit and check for its returned error
-	defer func() {
-		if err := fo.Close(); err != nil {
-			panic(err)
-		}
-	}()
-
-	if _, err := fo.Write(buf); err != nil {
-		panic(err)
-	}
-}
 func (t *Torrent) newPeerWorker(peer peers.Peer, eventsCh chan PeerEvent, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
 	pc := &peers.PeerConnection{
 		Peer:     &peer,
 		InfoHash: t.Metadata.Info.InfoHash,
 		PeerID:   t.PeerID,
 	}
+	pieces := len(t.Metadata.Info.Pieces)
 	peerAddr := peer.Addr()
 
 	t.ConnectedPeers[peerAddr] = struct{}{}
@@ -177,6 +169,7 @@ func (t *Torrent) newPeerWorker(peer peers.Peer, eventsCh chan PeerEvent, pieces
 			continue
 		}
 
+		fmt.Printf("Piece %d/%d downloaded by peer %s\n", pw.Index+1, pieces, peer.Addr())
 		eventsCh <- PeerEvent{
 			Type: EventPieceDownloaded,
 			Piece: &PieceDownloaded{
