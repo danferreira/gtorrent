@@ -26,7 +26,7 @@ func main() {
 		PeerID:   peerID,
 	}
 
-	err = t.Download()
+	err = t.Run()
 
 	if err != nil {
 		fmt.Print(err)

@@ -78,10 +78,10 @@ func NewRequest(index int, begin int, length int) Message {
 	}
 }
 
-func (m *Message) AsPiece() (uint32, []byte) {
-	_ = binary.BigEndian.Uint32(m.Payload[0:4])
+func (m *Message) AsPiece() (uint32, uint32, []byte) {
+	index := binary.BigEndian.Uint32(m.Payload[0:4])
 	begin := binary.BigEndian.Uint32(m.Payload[4:8])
 	data := m.Payload[8:]
 
-	return begin, data
+	return index, begin, data
 }

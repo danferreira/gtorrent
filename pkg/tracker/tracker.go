@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/danferreira/gtorrent/pkg/metadata"
-	peer "github.com/danferreira/gtorrent/pkg/peers"
+	"github.com/danferreira/gtorrent/pkg/peers"
 	"github.com/jackpal/bencode-go"
 )
 
@@ -32,11 +32,11 @@ type Tracker struct {
 }
 
 type TrackerResponse struct {
-	Peers    []peer.Peer
+	Peers    []peers.Peer
 	Interval uint
 }
 
-func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
+func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peers.Peer, int, error) {
 	params := url.Values{
 		"info_hash":  []string{string(t.Metadata.Info.InfoHash[:])},
 		"peer_id":    []string{string(t.PeerID[:])},
@@ -71,15 +71,15 @@ func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peer.Pe
 	peersResp := []byte(trackerResp.Peers)
 	chunks := slices.Collect(slices.Chunk(peersResp, 6))
 
-	peers := make([]peer.Peer, 0, len(chunks))
+	discoveredPeers := make([]peers.Peer, 0, len(chunks))
 
 	for _, p := range chunks {
-		peerv, err := peer.Unmarshal(p)
+		peerv, err := peers.Unmarshal(p)
 		if err != nil {
 			continue
 		}
-		peers = append(peers, peerv)
+		discoveredPeers = append(discoveredPeers, peerv)
 	}
 
-	return peers, trackerResp.Interval, nil
+	return discoveredPeers, trackerResp.Interval, nil
 }

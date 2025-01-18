@@ -8,8 +8,7 @@ import (
 )
 
 type Peer struct {
-	IP   net.IP
-	Port uint16
+	Addr string
 }
 
 func Unmarshal(buf []byte) (Peer, error) {
@@ -17,12 +16,10 @@ func Unmarshal(buf []byte) (Peer, error) {
 		return Peer{}, errors.New("invalid peer address")
 	}
 
-	return Peer{
-		IP:   net.IP(buf[:4]),
-		Port: binary.BigEndian.Uint16(buf[4:]),
-	}, nil
-}
+	host := net.IP(buf[:4])
+	port := binary.BigEndian.Uint16(buf[4:])
 
-func (p *Peer) Addr() string {
-	return net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
+	return Peer{
+		Addr: net.JoinHostPort(host.String(), strconv.Itoa(int(port))),
+	}, nil
 }

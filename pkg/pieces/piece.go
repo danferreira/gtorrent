@@ -5,3 +5,8 @@ type PieceWork struct {
 	Hash   [20]byte
 	Length int
 }
+
+type PieceDownloaded struct {
+	Index int
+	Data  []byte
+}

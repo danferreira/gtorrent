@@ -47,8 +47,7 @@ func TestConnect(t *testing.T) {
 
 	addr := ln.Addr().(*net.TCPAddr)
 	peer := Peer{
-		IP:   addr.IP,
-		Port: uint16(addr.Port),
+		Addr: net.JoinHostPort(addr.IP.String(), string(addr.Port)),
 	}
 
 	pc := PeerConnection{

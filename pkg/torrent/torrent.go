@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"fmt"
+	"math"
+	"net"
+	"sync"
 	"time"
 
 	"github.com/danferreira/gtorrent/pkg/metadata"
@@ -21,18 +24,14 @@ const (
 	EventPieceDownloaded
 )
 
-type PieceDownloaded struct {
-	Index int
-	Data  []byte
-}
-
 type PeerEvent struct {
 	Type  PeerEventType
 	Peer  *peers.Peer
-	Piece *PieceDownloaded
+	Piece *pieces.PieceDownloaded
 }
 
 type Torrent struct {
+	mu             sync.Mutex
 	Metadata       metadata.Metadata
 	Stats          *pieces.TorrentStats
 	PeerID         [20]byte
@@ -40,17 +39,24 @@ type Torrent struct {
 	Storage        *storage.Storage
 }
 
-func (t *Torrent) Download() error {
+func (t *Torrent) Run() error {
 	pieceHashes := t.Metadata.Info.Pieces
 	pieceLength := t.Metadata.Info.PieceLength
 	torrentSize := t.Metadata.Info.TotalLength()
-	piecesChan := make(chan *pieces.PieceWork, len(pieceHashes))
+
+	bitfieldSize := int(math.Ceil(float64(len(pieceHashes)) / 8))
+	bitfield := make(pieces.Bitfield, bitfieldSize)
+
+	resultChan := make(chan pieces.PieceDownloaded)
+	doneChan := make(chan bool)
+
 	storage, err := storage.NewStorage(t.Metadata.Info.Files)
 	if err != nil {
 		return err
 	}
 	t.Storage = storage
 
+	var piecesLeft []pieces.PieceWork
 	t.Stats = &pieces.TorrentStats{
 		Downloaded: 0,
 		Uploaded:   0,
@@ -72,118 +78,135 @@ func (t *Torrent) Download() error {
 		if err != nil {
 			fmt.Println("Disk check error: ", err)
 		} else if t.checkIntegrity(ph, data) {
+			bitfield.SetPiece(index)
+			amount := int64(len(data))
+			t.Stats.Downloaded += amount
+			t.Stats.Left -= amount
 			continue
 		}
 
-		piecesChan <- &pieces.PieceWork{Index: index, Hash: ph, Length: actualPieceLength}
+		piecesLeft = append(piecesLeft, pieces.PieceWork{Index: index, Hash: ph, Length: actualPieceLength})
 	}
 
+	if len(piecesLeft) == 0 {
+		fmt.Println("Nothing to download. Seeding mode")
+	}
 	t.ConnectedPeers = make(map[string]struct{})
 
 	peersChan := make(chan []peers.Peer)
-	peerEventChan := make(chan PeerEvent)
 	announceChan := make(chan tracker.Event)
-	doneChan := make(chan bool)
+	piecesChan := make(chan *pieces.PieceWork, len(pieceHashes))
+
+	for _, ph := range piecesLeft {
+		piecesChan <- &ph
+	}
+
 	// sigChan := make(chan os.Signal, 1)
 	// signal.Notify(sigChan, os.Interrupt)
 
 	go t.announceWorker(peersChan, announceChan)
-
-	piecesDownloaded := 0
+	go t.ListenForPeers(bitfield, resultChan, piecesChan, doneChan)
 
 	for {
 		select {
+		case pd := <-resultChan:
+			start := pd.Index * pieceLength
+			t.Storage.Write(start, pd.Data)
+			t.Stats.UpdateDownloaded(int64(len(pd.Data)))
+			downloaded, _, left := t.Stats.GetSnapshot()
+
+			percent := (float64(downloaded) / float64(torrentSize)) * 100
+			fmt.Printf("Downloading:  %.2f%% of %d from %d peers\n", percent, torrentSize, len(t.ConnectedPeers))
+
+			if left == 0 {
+				t.Storage.CloseFiles()
+				announceChan <- tracker.EventCompleted
+			}
 		case ps := <-peersChan:
-			for _, peer := range ps {
-				peerAddr := peer.Addr()
-				if _, connected := t.ConnectedPeers[peerAddr]; connected {
-					fmt.Printf("Peer %s is already connected\n", peerAddr)
-					continue
-				}
+			if len(piecesLeft) > 0 {
+				fmt.Println("Connecting to peers")
+				for _, peer := range ps {
+					peerAddr := peer.Addr
+					fmt.Println("Peer Addr", peerAddr)
+					if _, connected := t.ConnectedPeers[peerAddr]; connected {
+						fmt.Printf("Peer %s is already connected\n", peerAddr)
+						continue
+					}
 
-				go t.newPeerWorker(peer, peerEventChan, piecesChan, doneChan)
+					t.ConnectedPeers[peerAddr] = struct{}{}
+					go t.newPeerWorker(peer, resultChan, piecesChan, doneChan)
+				}
 			}
-		case event := <-peerEventChan:
-			switch event.Type {
-			case EventPieceDownloaded:
-				if event.Piece == nil {
-					continue
-				}
-
-				start := event.Piece.Index * pieceLength
-				t.Storage.Write(start, event.Piece.Data)
-				t.Stats.UpdateDownloaded(int64(len(event.Piece.Data)))
-
-				piecesDownloaded++
-				if piecesDownloaded == len(pieceHashes) {
-					t.Storage.CloseFiles()
-					announceChan <- tracker.EventCompleted
-				}
-
-			case EventPeerDisconnected:
-				if event.Peer == nil {
-					continue
-				}
-				fmt.Printf("Removing %s from list of connected peers\n", event.Peer.Addr())
-				delete(t.ConnectedPeers, event.Peer.Addr())
-			}
-			// case <-sigChan:
-			// 	fmt.Println("Quitting...")
-			// 	announceChan <- tracker.EventStopped
-
 		}
 	}
 }
 
-func (t *Torrent) newPeerWorker(peer peers.Peer, eventsCh chan PeerEvent, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
-	pc := &peers.PeerConnection{
-		Peer:     &peer,
-		InfoHash: t.Metadata.Info.InfoHash,
-		PeerID:   t.PeerID,
+func (t *Torrent) ListenForPeers(bitfield pieces.Bitfield, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, done chan bool) error {
+	fmt.Println("Listen for connections")
+	ln, err := net.Listen("tcp", ":6881")
+	if err != nil {
+		return err
 	}
-	pieces := len(t.Metadata.Info.Pieces)
-	peerAddr := peer.Addr()
 
-	t.ConnectedPeers[peerAddr] = struct{}{}
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			fmt.Println("Error during accepting new conn: ", err)
+			continue
+		}
+		go t.newPeerConn(conn, resultChan, piecesChan, done)
+	}
+}
+
+func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
+	peer := peers.Peer{
+		Addr: conn.LocalAddr().String(),
+	}
+
+	pc := &peers.PeerConnection{
+		Peer:       &peer,
+		InfoHash:   t.Metadata.Info.InfoHash,
+		PeerID:     t.PeerID,
+		ResultChan: resultChan,
+		PiecesChan: piecesChan,
+	}
+
+	err := pc.AcceptConnection(conn)
+	if err != nil {
+		fmt.Println("Error when accepting connection", err)
+	}
+
+	err = pc.ExchangeMessages(doneChan)
+	if err != nil {
+		fmt.Println("Error when exchanging messages with peer", err)
+	}
+
+}
+
+func (t *Torrent) newPeerWorker(peer peers.Peer, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
+	pc := &peers.PeerConnection{
+		Peer:       &peer,
+		InfoHash:   t.Metadata.Info.InfoHash,
+		PeerID:     t.PeerID,
+		ResultChan: resultChan,
+		PiecesChan: piecesChan,
+	}
 
 	if err := pc.Connect(doneChan); err != nil {
 		fmt.Println("Error during connection: ", err)
-		eventsCh <- PeerEvent{
-			Type: EventPeerDisconnected,
-			Peer: pc.Peer,
-		}
+
+		fmt.Printf("Removing %s from list of connected peers\n", peer.Addr)
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		delete(t.ConnectedPeers, peer.Addr)
+
 		return
 	}
 
-	for pw := range piecesChan {
-		data, err := pc.AttemptDownloadPiece(pw, doneChan)
-		if err != nil {
-			fmt.Println("An error occurred", err)
-			piecesChan <- pw
-			continue
-		}
-
-		if !t.checkIntegrity(pw.Hash, data) {
-			fmt.Println("Invalid piece", pw.Index)
-			piecesChan <- pw
-			continue
-		}
-
-		fmt.Printf("Piece %d/%d downloaded by peer %s\n", pw.Index+1, pieces, peer.Addr())
-		eventsCh <- PeerEvent{
-			Type: EventPieceDownloaded,
-			Piece: &PieceDownloaded{
-				Index: pw.Index,
-				Data:  data,
-			},
-		}
-
+	err := pc.ExchangeMessages(doneChan)
+	if err != nil {
+		fmt.Println("Error when exchanging messages with peer", err)
 	}
-}
-
-func (t *Torrent) checkIntegrity(expectedHash [20]byte, data []byte) bool {
-	hash := sha1.Sum(data)
-	return bytes.Equal(hash[:], expectedHash[:])
 }
 
 func (t *Torrent) announceWorker(peersChan chan []peers.Peer, announceChan chan tracker.Event) error {
@@ -230,4 +253,9 @@ func (t *Torrent) announceWorker(peersChan chan []peers.Peer, announceChan chan 
 			}
 		}
 	}
+}
+
+func (t *Torrent) checkIntegrity(expectedHash [20]byte, data []byte) bool {
+	hash := sha1.Sum(data)
+	return bytes.Equal(hash[:], expectedHash[:])
 }

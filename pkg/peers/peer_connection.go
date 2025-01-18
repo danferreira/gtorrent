@@ -2,11 +2,14 @@ package peers
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"math"
 	"net"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/danferreira/gtorrent/pkg/handshake"
@@ -15,21 +18,44 @@ import (
 )
 
 const BlockSize = 16 * 1024 // 16 KB
+const MaxRequests = 30
 
 type PeerConnection struct {
 	Peer               *Peer
 	InfoHash           [20]byte
 	PeerID             [20]byte
-	Choked             bool
+	PeerIsChoked       bool
+	PeerIsInterested   bool
+	PeerChokedUs       bool
+	PeerInterestedUs   bool
 	Conn               net.Conn
-	Bitfield           pieces.Bitfield
+	PeerBitfield       pieces.Bitfield
+	OwnBitfield        *pieces.Bitfield
 	PiecesChan         chan *pieces.PieceWork
 	CanReceiveBitfield bool
+	ResultChan         chan pieces.PieceDownloaded
+}
+
+func (pc *PeerConnection) AcceptConnection(conn net.Conn) error {
+	err := pc.receiveHandshake(conn)
+	if err != nil {
+		return err
+	}
+	err = pc.sendHandshake(conn)
+	if err != nil {
+		return err
+	}
+
+	pc.Conn = conn
+	pc.PeerIsChoked = true
+
+	fmt.Println("Peer connected: ", pc.Peer.Addr)
+
+	return pc.sendBitfield()
 }
 
 func (pc *PeerConnection) Connect(done chan bool) error {
-	addr := pc.Peer.Addr()
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	conn, err := net.DialTimeout("tcp", pc.Peer.Addr, 5*time.Second)
 	if err != nil {
 		fmt.Println("Error: ", err)
 		return err
@@ -45,98 +71,117 @@ func (pc *PeerConnection) Connect(done chan bool) error {
 		return err
 	}
 
-	fmt.Println("Peer connected: ", addr)
+	fmt.Println("Peer connected: ", pc.Peer.Addr)
 
 	pc.Conn = conn
-	pc.Choked = true
+	pc.PeerChokedUs = true
 	pc.CanReceiveBitfield = true
-
-	pc.sendInterested()
 
 	return nil
 }
 
-func (pc *PeerConnection) AttemptDownloadPiece(pw *pieces.PieceWork, done chan bool) ([]byte, error) {
-	numBlocks := pw.Length / BlockSize
-	if pw.Length%BlockSize > 0 {
-		numBlocks++
+func (pc *PeerConnection) ExchangeMessages(done chan bool) error {
+	requests := 0
+
+	type pendingPiece struct {
+		pw   *pieces.PieceWork
+		data map[int][]byte
 	}
 
-	blocks := make(map[int]int)
-	data := make(map[int][]byte)
+	pendingPieces := make(map[int]pendingPiece)
 
-	for i := 0; i < numBlocks; i++ {
-		begin := i * BlockSize
-		end := begin + BlockSize
-
-		if end > pw.Length {
-			end = pw.Length
-		}
-
-		blockSize := end - begin
-		blocks[begin] = blockSize
-	}
-
-	results := make(chan block, numBlocks)
-
-	nRequests := 0
-	pending := 0
 outerLoop:
 	for {
 		select {
-		case result := <-results:
-			data[result.offset] = result.data
-
-			nRequests--
-			if len(data) == numBlocks {
-				keys := make([]int, 0, len(data))
-				for k := range data {
-					keys = append(keys, k)
-				}
-				sort.Ints(keys)
-
-				var r []byte
-				for _, k := range keys {
-					r = append(r, data[k]...)
-				}
-
-				return r, nil
-			}
 		case <-done:
+			fmt.Println("Quitting...Should send a close message to peer")
 			break outerLoop
 		default:
-			if !pc.Choked && pending < len(blocks) {
-				for offset, blockSize := range blocks {
-					if nRequests >= 5 {
-						break
+			if !pc.PeerChokedUs && pc.PeerInterestedUs && requests < MaxRequests {
+				select {
+				case pw := <-pc.PiecesChan:
+					if pc.PeerBitfield.HasPiece(pw.Index) {
+						numBlocks := int(math.Ceil(float64(pw.Length) / BlockSize))
+
+						for i := 0; i < numBlocks; i++ {
+							offset := i * BlockSize
+							end := offset + BlockSize
+
+							if end > pw.Length {
+								end = pw.Length
+							}
+
+							blockSize := end - offset
+
+							err := pc.sendRequest(pw.Index, offset, blockSize)
+							if err != nil {
+								fmt.Println("Error: ", err)
+								pc.PiecesChan <- pw
+								break
+							}
+							pendingPieces[pw.Index] = pendingPiece{
+								pw:   pw,
+								data: make(map[int][]byte),
+							}
+
+							requests++
+						}
+					} else {
+						fmt.Println("Peer has not this piece")
+						pc.PiecesChan <- pw
 					}
 
-					err := pc.sendRequest(pw.Index, offset, blockSize)
-					if err != nil {
-						fmt.Println("Error: ", err)
-						break
-					}
-
-					nRequests++
-					pending++
+				default:
+					// fmt.Println("There is no more pieces to download")
 				}
 			}
 
 			msg, err := message.Read(pc.Conn)
 			if err != nil {
 				fmt.Println("Error: ", err)
-				return nil, err
+				return err
 			}
 
-			err = pc.handleMessage(msg, results)
+			block, err := pc.handleMessage(msg)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			pc.CanReceiveBitfield = false
+
+			if block != nil {
+				requests--
+				pendingPiece := pendingPieces[block.index]
+				pendingPiece.data[block.offset] = block.data
+				numBlocks := int(math.Ceil(float64(pendingPiece.pw.Length) / BlockSize))
+
+				if len(pendingPiece.data) == numBlocks {
+					keys := slices.Sorted(maps.Keys(pendingPiece.data))
+
+					var r []byte
+					for _, k := range keys {
+						r = append(r, pendingPiece.data[k]...)
+					}
+
+					if !pc.checkIntegrity(pendingPiece.pw.Hash, r) {
+						fmt.Println("Invalid piece hash. Sending it back...")
+						pc.PiecesChan <- pendingPiece.pw
+					}
+
+					pc.ResultChan <- pieces.PieceDownloaded{
+						Index: block.index,
+						Data:  r,
+					}
+				}
+
+			}
 		}
 	}
 
-	return nil, nil
+	return nil
+}
+
+func (pc *PeerConnection) checkIntegrity(expectedHash [20]byte, data []byte) bool {
+	hash := sha1.Sum(data)
+	return bytes.Equal(hash[:], expectedHash[:])
 }
 
 func (pc *PeerConnection) sendHandshake(conn io.Writer) error {
@@ -150,7 +195,6 @@ func (pc *PeerConnection) sendHandshake(conn io.Writer) error {
 
 func (pc *PeerConnection) receiveHandshake(conn io.Reader) error {
 	h, err := handshake.Read(conn)
-
 	if err != nil {
 		return err
 	}
@@ -163,47 +207,55 @@ func (pc *PeerConnection) receiveHandshake(conn io.Reader) error {
 }
 
 type block struct {
+	index  int
 	offset int
 	data   []byte
 }
 
-func (pc *PeerConnection) handleMessage(m *message.Message, results chan block) error {
+func (pc *PeerConnection) handleMessage(m *message.Message) (*block, error) {
 	if m == nil {
 		fmt.Println("Keep Alive")
-		return nil
+		return nil, nil
 	}
 	switch m.ID {
 	case message.MessageChoke:
 		fmt.Println("Peer Choked us")
-		pc.Choked = true
+		pc.PeerChokedUs = true
 	case message.MessageUnchoke:
 		fmt.Println("Peer Unchoked us")
-		pc.Choked = false
+		pc.PeerChokedUs = false
+	case message.MessageInterested:
+		fmt.Println("Peer is interested on us")
+		pc.PeerIsInterested = true
+		pc.sendUnchoke()
 	case message.MessageNotInterest:
-		fmt.Println("Peer is not interested in us")
+		fmt.Println("Peer is not interested on us")
+		pc.PeerIsInterested = false
 	case message.MessageHave:
 		fmt.Println("Peer have a piece")
 	case message.MessageBitfield:
 		fmt.Println("Peer sent bitfield")
 		if !pc.CanReceiveBitfield {
-			return errors.New("late bitfield received")
+			return nil, errors.New("late bitfield received")
 		}
-		pc.Bitfield = m.Payload
+		pc.PeerBitfield = m.Payload
+		pc.sendInterested()
 	case message.MessageRequest:
 		fmt.Println("Peer ask for a piece")
 	case message.MessagePiece:
-		offset, data := m.AsPiece()
-		results <- block{
+		index, offset, data := m.AsPiece()
+		return &block{
+			index:  int(index),
 			offset: int(offset),
 			data:   data,
-		}
+		}, nil
 	case message.MessageCancel:
 		fmt.Println("Peer wants to cancel")
 	default:
 		fmt.Printf("ID: %d Not implemented yet", m.ID)
 	}
 
-	return nil
+	return nil, nil
 }
 
 func (pc *PeerConnection) sendInterested() error {
@@ -218,10 +270,30 @@ func (pc *PeerConnection) sendInterested() error {
 		return err
 	}
 
+	pc.PeerInterestedUs = true
+
 	return nil
 }
+
 func (pc *PeerConnection) sendRequest(index, begin, length int) error {
 	m := message.NewRequest(index, begin, length)
+	_, err := pc.Conn.Write(m.Serialize())
+	return err
+}
+
+func (pc *PeerConnection) sendBitfield() error {
+	m := message.Message{
+		ID:      message.MessageBitfield,
+		Payload: *pc.OwnBitfield,
+	}
+	_, err := pc.Conn.Write(m.Serialize())
+	return err
+}
+
+func (pc *PeerConnection) sendUnchoke() error {
+	m := message.Message{
+		ID: message.MessageUnchoke,
+	}
 	_, err := pc.Conn.Write(m.Serialize())
 	return err
 }
