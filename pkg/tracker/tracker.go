@@ -41,9 +41,9 @@ func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peers.P
 		"info_hash":  []string{string(t.Metadata.Info.InfoHash[:])},
 		"peer_id":    []string{string(t.PeerID[:])},
 		"port":       []string{strconv.Itoa(6881)},
-		"downloaded": []string{string(downloaded)},
-		"uploaded":   []string{string(uploaded)},
-		"left":       []string{string(left)},
+		"downloaded": []string{strconv.FormatInt(downloaded, 10)},
+		"uploaded":   []string{strconv.FormatInt(uploaded, 10)},
+		"left":       []string{strconv.FormatInt(left, 10)},
 		"compact":    []string{"1"},
 	}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,7 +48,7 @@ func TestConnect(t *testing.T) {
 
 	addr := ln.Addr().(*net.TCPAddr)
 	peer := Peer{
-		Addr: net.JoinHostPort(addr.IP.String(), string(addr.Port)),
+		Addr: net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port)),
 	}
 
 	pc := PeerConnection{
