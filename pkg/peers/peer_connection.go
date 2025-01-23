@@ -15,6 +15,7 @@ import (
 	"github.com/danferreira/gtorrent/pkg/handshake"
 	"github.com/danferreira/gtorrent/pkg/message"
 	"github.com/danferreira/gtorrent/pkg/pieces"
+	"github.com/danferreira/gtorrent/pkg/storage"
 )
 
 const BlockSize = 16 * 1024 // 16 KB
@@ -34,6 +35,8 @@ type PeerConnection struct {
 	PiecesChan         chan *pieces.PieceWork
 	CanReceiveBitfield bool
 	ResultChan         chan pieces.PieceDownloaded
+	PieceLength        int
+	Storage            *storage.Storage
 }
 
 func (pc *PeerConnection) AcceptConnection(conn net.Conn) error {
@@ -55,7 +58,7 @@ func (pc *PeerConnection) AcceptConnection(conn net.Conn) error {
 }
 
 func (pc *PeerConnection) Connect(done chan bool) error {
-	conn, err := net.DialTimeout("tcp", pc.Peer.Addr, 5*time.Second)
+	conn, err := net.DialTimeout("tcp4", pc.Peer.Addr, 5*time.Second)
 	if err != nil {
 		fmt.Println("Error: ", err)
 		return err
@@ -169,6 +172,7 @@ outerLoop:
 					pc.ResultChan <- pieces.PieceDownloaded{
 						Index: block.index,
 						Data:  r,
+						PW:    *pendingPiece.pw,
 					}
 				}
 
@@ -227,12 +231,22 @@ func (pc *PeerConnection) handleMessage(m *message.Message) (*block, error) {
 	case message.MessageInterested:
 		fmt.Println("Peer is interested on us")
 		pc.PeerIsInterested = true
-		pc.sendUnchoke()
+		if err := pc.sendUnchoke(); err != nil {
+			fmt.Println("Error on sending unchoke", err)
+			return nil, nil
+		}
+		pc.PeerIsChoked = false
 	case message.MessageNotInterest:
 		fmt.Println("Peer is not interested on us")
 		pc.PeerIsInterested = false
 	case message.MessageHave:
 		fmt.Println("Peer have a piece")
+		index := m.ParseAsHave()
+		pc.PeerBitfield.SetPiece(index)
+		if !pc.PeerIsInterested && !pc.OwnBitfield.HasPiece(index) {
+			pc.sendInterested()
+		}
+
 	case message.MessageBitfield:
 		fmt.Println("Peer sent bitfield")
 		if !pc.CanReceiveBitfield {
@@ -242,6 +256,31 @@ func (pc *PeerConnection) handleMessage(m *message.Message) (*block, error) {
 		pc.sendInterested()
 	case message.MessageRequest:
 		fmt.Println("Peer ask for a piece")
+
+		if pc.PeerIsChoked {
+			fmt.Println("Peer is choked. Should wait until unchoked")
+			return nil, nil
+		}
+
+		m, err := m.ParseAsRequest()
+		if err != nil {
+			fmt.Println("Error parsing request message:", err)
+			return nil, nil
+		}
+
+		// read data from local storage
+		data, err := pc.Storage.Read((int(m.Index)*pc.PieceLength)+int(m.Begin), int(m.Length))
+		if err != nil {
+			fmt.Println("Error reading piece from storage:", err)
+			return nil, nil
+		}
+
+		err = pc.sendPiece(int(m.Index), int(m.Begin), data)
+		if err != nil {
+			fmt.Println("Error when sending piece to peer", err)
+			return nil, nil
+		}
+
 	case message.MessagePiece:
 		index, offset, data := m.AsPiece()
 		return &block{
@@ -282,6 +321,7 @@ func (pc *PeerConnection) sendRequest(index, begin, length int) error {
 }
 
 func (pc *PeerConnection) sendBitfield() error {
+	fmt.Println("Sending bitfield")
 	m := message.Message{
 		ID:      message.MessageBitfield,
 		Payload: *pc.OwnBitfield,
@@ -295,5 +335,11 @@ func (pc *PeerConnection) sendUnchoke() error {
 		ID: message.MessageUnchoke,
 	}
 	_, err := pc.Conn.Write(m.Serialize())
+	return err
+}
+
+func (pc *PeerConnection) sendPiece(index, begin int, data []byte) error {
+	pieceMsg := message.NewPiece(index, begin, data)
+	_, err := pc.Conn.Write(pieceMsg.Serialize())
 	return err
 }

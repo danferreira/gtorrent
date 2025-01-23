@@ -9,4 +9,5 @@ type PieceWork struct {
 type PieceDownloaded struct {
 	Index int
 	Data  []byte
+	PW    PieceWork
 }

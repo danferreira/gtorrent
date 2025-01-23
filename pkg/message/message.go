@@ -25,6 +25,12 @@ type Message struct {
 	Payload []byte
 }
 
+type RequestPayload struct {
+	Index  uint32
+	Begin  uint32
+	Length uint32
+}
+
 func (m *Message) Serialize() []byte {
 	if m == nil {
 		return make([]byte, 4)
@@ -66,7 +72,7 @@ func Read(reader io.Reader) (*Message, error) {
 	}, nil
 }
 
-func NewRequest(index int, begin int, length int) Message {
+func NewRequest(index, begin, length int) Message {
 	buff := make([]byte, 12)
 	binary.BigEndian.PutUint32(buff, uint32(index))
 	binary.BigEndian.PutUint32(buff[4:], uint32(begin))
@@ -78,10 +84,39 @@ func NewRequest(index int, begin int, length int) Message {
 	}
 }
 
+func NewPiece(index, begin int, data []byte) Message {
+	buff := make([]byte, 8+len(data))
+	binary.BigEndian.PutUint32(buff[0:4], uint32(index))
+	binary.BigEndian.PutUint32(buff[4:], uint32(begin))
+	copy(buff[8:], data)
+
+	return Message{
+		ID:      MessagePiece,
+		Payload: buff,
+	}
+}
+
 func (m *Message) AsPiece() (uint32, uint32, []byte) {
 	index := binary.BigEndian.Uint32(m.Payload[0:4])
 	begin := binary.BigEndian.Uint32(m.Payload[4:8])
 	data := m.Payload[8:]
 
 	return index, begin, data
+}
+
+func (m *Message) ParseAsHave() int {
+	index := binary.BigEndian.Uint32(m.Payload[0:4])
+	return int(index)
+}
+
+func (m *Message) ParseAsRequest() (*RequestPayload, error) {
+	if len(m.Payload) < 12 {
+		return nil, fmt.Errorf("invalid length for a request message")
+	}
+
+	return &RequestPayload{
+		Index:  binary.BigEndian.Uint32(m.Payload[0:4]),
+		Begin:  binary.BigEndian.Uint32(m.Payload[4:8]),
+		Length: binary.BigEndian.Uint32(m.Payload[8:12]),
+	}, nil
 }

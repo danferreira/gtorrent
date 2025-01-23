@@ -104,14 +104,20 @@ func (t *Torrent) Run() error {
 	// sigChan := make(chan os.Signal, 1)
 	// signal.Notify(sigChan, os.Interrupt)
 
+	if err := t.ListenForPeers(bitfield, resultChan, piecesChan, doneChan); err != nil {
+		return err
+	}
 	go t.announceWorker(peersChan, announceChan)
-	go t.ListenForPeers(bitfield, resultChan, piecesChan, doneChan)
 
 	for {
 		select {
 		case pd := <-resultChan:
 			start := pd.Index * pieceLength
-			t.Storage.Write(start, pd.Data)
+			if err := t.Storage.Write(start, pd.Data); err != nil {
+				fmt.Println("Error writing piece to disk: ", err)
+				piecesChan <- &pd.PW
+				continue
+			}
 			t.Stats.UpdateDownloaded(int64(len(pd.Data)))
 			downloaded, _, left := t.Stats.GetSnapshot()
 
@@ -119,7 +125,7 @@ func (t *Torrent) Run() error {
 			fmt.Printf("Downloading:  %.2f%% of %d from %d peers\n", percent, torrentSize, len(t.ConnectedPeers))
 
 			if left == 0 {
-				t.Storage.CloseFiles()
+				_ = t.Storage.CloseFiles()
 				announceChan <- tracker.EventCompleted
 			}
 		case ps := <-peersChan:
@@ -128,6 +134,11 @@ func (t *Torrent) Run() error {
 				for _, peer := range ps {
 					peerAddr := peer.Addr
 					fmt.Println("Peer Addr", peerAddr)
+					if peerAddr == "127.0.0.1:6881" {
+						fmt.Printf("Own address. Skipping...")
+						continue
+					}
+
 					if _, connected := t.ConnectedPeers[peerAddr]; connected {
 						fmt.Printf("Peer %s is already connected\n", peerAddr)
 						continue
@@ -143,32 +154,41 @@ func (t *Torrent) Run() error {
 
 func (t *Torrent) ListenForPeers(bitfield pieces.Bitfield, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, done chan bool) error {
 	fmt.Println("Listen for connections")
-	ln, err := net.Listen("tcp", ":6881")
+	ln, err := net.Listen("tcp4", ":6881")
 	if err != nil {
+		fmt.Println("Error listening for connections: ", err)
 		return err
 	}
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			fmt.Println("Error during accepting new conn: ", err)
-			continue
+	go func(ln net.Listener) {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				fmt.Println("Error during accepting new conn: ", err)
+				continue
+			}
+			go t.newPeerConn(conn, bitfield, resultChan, piecesChan, done)
 		}
-		go t.newPeerConn(conn, resultChan, piecesChan, done)
-	}
+	}(ln)
+
+	return nil
 }
 
-func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
+func (t *Torrent) newPeerConn(conn net.Conn, bitfield pieces.Bitfield, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
+	fmt.Println("New peer connection:", conn.RemoteAddr().String())
 	peer := peers.Peer{
-		Addr: conn.LocalAddr().String(),
+		Addr: conn.RemoteAddr().String(),
 	}
 
 	pc := &peers.PeerConnection{
-		Peer:       &peer,
-		InfoHash:   t.Metadata.Info.InfoHash,
-		PeerID:     t.PeerID,
-		ResultChan: resultChan,
-		PiecesChan: piecesChan,
+		Peer:        &peer,
+		InfoHash:    t.Metadata.Info.InfoHash,
+		PeerID:      t.PeerID,
+		ResultChan:  resultChan,
+		PiecesChan:  piecesChan,
+		OwnBitfield: &bitfield,
+		Storage:     t.Storage,
+		PieceLength: t.Metadata.Info.PieceLength,
 	}
 
 	err := pc.AcceptConnection(conn)
@@ -185,11 +205,13 @@ func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan pieces.PieceDownloa
 
 func (t *Torrent) newPeerWorker(peer peers.Peer, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
 	pc := &peers.PeerConnection{
-		Peer:       &peer,
-		InfoHash:   t.Metadata.Info.InfoHash,
-		PeerID:     t.PeerID,
-		ResultChan: resultChan,
-		PiecesChan: piecesChan,
+		Peer:        &peer,
+		InfoHash:    t.Metadata.Info.InfoHash,
+		PeerID:      t.PeerID,
+		ResultChan:  resultChan,
+		PiecesChan:  piecesChan,
+		Storage:     t.Storage,
+		PieceLength: t.Metadata.Info.PieceLength,
 	}
 
 	if err := pc.Connect(doneChan); err != nil {
@@ -209,7 +231,7 @@ func (t *Torrent) newPeerWorker(peer peers.Peer, resultChan chan pieces.PieceDow
 	}
 }
 
-func (t *Torrent) announceWorker(peersChan chan []peers.Peer, announceChan chan tracker.Event) error {
+func (t *Torrent) announceWorker(peersChan chan []peers.Peer, announceChan chan tracker.Event) {
 	fmt.Println("Starting announce worker")
 
 	tkr := tracker.Tracker{

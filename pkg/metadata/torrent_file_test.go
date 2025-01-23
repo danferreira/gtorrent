@@ -30,9 +30,9 @@ func TestParseMultiFileTorrent(t *testing.T) {
 	assert.Equal(t, 3, len(metadata.Info.Files))
 	assert.Equal(t, 658, len(metadata.Info.Pieces))
 	assert.Equal(t, 32768, metadata.Info.PieceLength)
-	assert.Equal(t, "file_1.txt", metadata.Info.Files[0].Path)
-	assert.Equal(t, "file_2.txt", metadata.Info.Files[1].Path)
-	assert.Equal(t, "file_3.txt", metadata.Info.Files[2].Path)
+	assert.Equal(t, "files/file_1.txt", metadata.Info.Files[0].Path)
+	assert.Equal(t, "files/file_2.txt", metadata.Info.Files[1].Path)
+	assert.Equal(t, "files/file_3.txt", metadata.Info.Files[2].Path)
 
 	var expectedHash = [20]byte{0x1c, 0x78, 0xe7, 0x26, 0x0d, 0x0b, 0xcf, 0x7f, 0xa2, 0x72, 0xea, 0xd1, 0xef, 0xc8, 0x47, 0x9c, 0xc4, 0xaa, 0x84, 0xf0}
 	assert.Equal(t, expectedHash, metadata.Info.InfoHash)

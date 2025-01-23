@@ -69,7 +69,7 @@ func Parse(path string) (*Metadata, error) {
 		return nil, err
 	}
 
-	announceUrl, err := url.Parse(tf.Announce)
+	announceURL, err := url.Parse(tf.Announce)
 
 	if err != nil {
 		return nil, err
@@ -113,7 +113,7 @@ func Parse(path string) (*Metadata, error) {
 	}
 
 	return &Metadata{
-		Announce: announceUrl,
+		Announce: announceURL,
 		Info: MetadataInfo{
 			Name:        tf.Info.Name,
 			Pieces:      pieces,

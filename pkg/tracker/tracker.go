@@ -1,6 +1,8 @@
 package tracker
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -21,7 +23,7 @@ const (
 	EventUpdated   Event = ""
 )
 
-type TrackerResp struct {
+type rawResponse struct {
 	Interval int
 	Peers    string
 }
@@ -29,11 +31,6 @@ type TrackerResp struct {
 type Tracker struct {
 	Metadata metadata.Metadata
 	PeerID   [20]byte
-}
-
-type TrackerResponse struct {
-	Peers    []peers.Peer
-	Interval uint
 }
 
 func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peers.Peer, int, error) {
@@ -53,8 +50,13 @@ func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peers.P
 
 	url := t.Metadata.Announce
 	url.RawQuery = params.Encode()
+	myDialer := net.Dialer{}
 
-	c := &http.Client{Timeout: 15 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return myDialer.DialContext(ctx, "tcp4", addr)
+	}
+	c := &http.Client{Timeout: 15 * time.Second, Transport: transport}
 	resp, err := c.Get(url.String())
 	if err != nil {
 		return nil, 0, err
@@ -62,7 +64,7 @@ func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peers.P
 
 	defer resp.Body.Close()
 
-	trackerResp := TrackerResp{}
+	trackerResp := rawResponse{}
 	err = bencode.Unmarshal(resp.Body, &trackerResp)
 	if err != nil {
 		return nil, 0, err

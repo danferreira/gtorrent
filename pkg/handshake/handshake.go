@@ -20,7 +20,7 @@ func (h *Handshake) Serialize() []byte {
 	curr += copy(buf[curr:], []byte(ProtocolIdentifier))
 	curr += copy(buf[curr:], make([]byte, 8)) //Reserved for Flags
 	curr += copy(buf[curr:], h.InfoHash[:])
-	curr += copy(buf[curr:], h.PeerID[:])
+	copy(buf[curr:], h.PeerID[:])
 	return buf
 }
 
