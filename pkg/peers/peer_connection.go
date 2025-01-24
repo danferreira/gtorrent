@@ -32,14 +32,13 @@ type PeerConnection struct {
 	Conn               net.Conn
 	PeerBitfield       pieces.Bitfield
 	OwnBitfield        *pieces.Bitfield
-	PiecesChan         chan *pieces.PieceWork
 	CanReceiveBitfield bool
-	ResultChan         chan pieces.PieceDownloaded
 	PieceLength        int
 	Storage            *storage.Storage
 }
 
 func (pc *PeerConnection) AcceptConnection(conn net.Conn) error {
+	pc.Conn = conn
 	err := pc.receiveHandshake(conn)
 	if err != nil {
 		return err
@@ -49,7 +48,6 @@ func (pc *PeerConnection) AcceptConnection(conn net.Conn) error {
 		return err
 	}
 
-	pc.Conn = conn
 	pc.PeerIsChoked = true
 
 	fmt.Println("Peer connected: ", pc.Peer.Addr)
@@ -57,7 +55,7 @@ func (pc *PeerConnection) AcceptConnection(conn net.Conn) error {
 	return pc.sendBitfield()
 }
 
-func (pc *PeerConnection) Connect(done chan bool) error {
+func (pc *PeerConnection) Connect() error {
 	conn, err := net.DialTimeout("tcp4", pc.Peer.Addr, 5*time.Second)
 	if err != nil {
 		fmt.Println("Error: ", err)
@@ -83,7 +81,7 @@ func (pc *PeerConnection) Connect(done chan bool) error {
 	return nil
 }
 
-func (pc *PeerConnection) ExchangeMessages(done chan bool) error {
+func (pc *PeerConnection) ExchangeMessages(piecesChan chan *pieces.PieceWork, resultChan chan pieces.PieceDownloaded, done <-chan bool) error {
 	requests := 0
 
 	type pendingPiece struct {
@@ -102,7 +100,7 @@ outerLoop:
 		default:
 			if !pc.PeerChokedUs && pc.PeerInterestedUs && requests < MaxRequests {
 				select {
-				case pw := <-pc.PiecesChan:
+				case pw := <-piecesChan:
 					if pc.PeerBitfield.HasPiece(pw.Index) {
 						numBlocks := int(math.Ceil(float64(pw.Length) / BlockSize))
 
@@ -119,7 +117,7 @@ outerLoop:
 							err := pc.sendRequest(pw.Index, offset, blockSize)
 							if err != nil {
 								fmt.Println("Error: ", err)
-								pc.PiecesChan <- pw
+								piecesChan <- pw
 								break
 							}
 							pendingPieces[pw.Index] = pendingPiece{
@@ -131,7 +129,7 @@ outerLoop:
 						}
 					} else {
 						fmt.Println("Peer has not this piece")
-						pc.PiecesChan <- pw
+						piecesChan <- pw
 					}
 
 				default:
@@ -166,10 +164,10 @@ outerLoop:
 
 					if !pc.checkIntegrity(pendingPiece.pw.Hash, r) {
 						fmt.Println("Invalid piece hash. Sending it back...")
-						pc.PiecesChan <- pendingPiece.pw
+						piecesChan <- pendingPiece.pw
 					}
 
-					pc.ResultChan <- pieces.PieceDownloaded{
+					resultChan <- pieces.PieceDownloaded{
 						Index: block.index,
 						Data:  r,
 						PW:    *pendingPiece.pw,
@@ -339,7 +337,12 @@ func (pc *PeerConnection) sendUnchoke() error {
 }
 
 func (pc *PeerConnection) sendPiece(index, begin int, data []byte) error {
-	pieceMsg := message.NewPiece(index, begin, data)
-	_, err := pc.Conn.Write(pieceMsg.Serialize())
+	m := message.NewPiece(index, begin, data)
+	_, err := pc.Conn.Write(m.Serialize())
+	return err
+}
+func (pc *PeerConnection) SendHave(index int) error {
+	m := message.NewHave(index)
+	_, err := pc.Conn.Write(m.Serialize())
 	return err
 }

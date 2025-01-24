@@ -96,6 +96,16 @@ func NewPiece(index, begin int, data []byte) Message {
 	}
 }
 
+func NewHave(index int) Message {
+	buff := make([]byte, 4)
+	binary.BigEndian.PutUint32(buff, uint32(index))
+
+	return Message{
+		ID:      MessagePiece,
+		Payload: buff,
+	}
+}
+
 func (m *Message) AsPiece() (uint32, uint32, []byte) {
 	index := binary.BigEndian.Uint32(m.Payload[0:4])
 	begin := binary.BigEndian.Uint32(m.Payload[4:8])
