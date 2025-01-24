@@ -9,17 +9,17 @@ import (
 	"github.com/danferreira/gtorrent/pkg/metadata"
 )
 
-type StorageFile struct {
+type File struct {
 	File   *os.File
 	Path   string
 	Length int
 }
 type Storage struct {
-	Files []StorageFile
+	Files []File
 }
 
 func NewStorage(files []metadata.FileInfo) (*Storage, error) {
-	var sFiles []StorageFile
+	var sFiles []File
 
 	for _, f := range files {
 		dir := filepath.Dir(f.Path)
@@ -31,7 +31,7 @@ func NewStorage(files []metadata.FileInfo) (*Storage, error) {
 		if err != nil {
 			return nil, err
 		}
-		sFiles = append(sFiles, StorageFile{
+		sFiles = append(sFiles, File{
 			File:   file,
 			Path:   f.Path,
 			Length: f.Length,

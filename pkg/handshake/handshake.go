@@ -26,13 +26,7 @@ func (h *Handshake) Serialize() []byte {
 
 func (h *Handshake) Write(writer io.Writer) error {
 	_, err := writer.Write(h.Serialize())
-
-	if err != nil {
-		fmt.Println("Error: ", err)
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func Read(reader io.Reader) (*Handshake, error) {
@@ -65,8 +59,15 @@ func Read(reader io.Reader) (*Handshake, error) {
 
 	var infoHash, peerID [20]byte
 
-	io.ReadFull(reader, infoHash[:])
-	io.ReadFull(reader, peerID[:])
+	_, err = io.ReadFull(reader, infoHash[:])
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = io.ReadFull(reader, peerID[:])
+	if err != nil {
+		return nil, err
+	}
 
 	return &Handshake{
 		InfoHash: infoHash,

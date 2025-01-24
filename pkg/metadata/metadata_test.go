@@ -8,7 +8,7 @@ import (
 
 func TestTotalLength(t *testing.T) {
 	metadata := Metadata{
-		Info: MetadataInfo{
+		Info: Info{
 			Files: []FileInfo{
 				{
 					Length: 1024000,

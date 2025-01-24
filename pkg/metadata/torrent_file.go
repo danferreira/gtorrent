@@ -114,7 +114,7 @@ func Parse(path string) (*Metadata, error) {
 
 	return &Metadata{
 		Announce: announceURL,
-		Info: MetadataInfo{
+		Info: Info{
 			Name:        tf.Info.Name,
 			Pieces:      pieces,
 			PieceLength: tf.Info.PieceLength,

@@ -6,10 +6,10 @@ import (
 
 type Metadata struct {
 	Announce *url.URL
-	Info     MetadataInfo
+	Info     Info
 }
 
-type MetadataInfo struct {
+type Info struct {
 	Name        string
 	Pieces      [][20]byte
 	PieceLength int
@@ -22,7 +22,7 @@ type FileInfo struct {
 	Length int
 }
 
-func (t *MetadataInfo) TotalLength() int {
+func (t *Info) TotalLength() int {
 	total := 0
 	for _, file := range t.Files {
 		total += file.Length

@@ -41,7 +41,7 @@ func TestTrackerAnnounce(t *testing.T) {
 
 	testMetadata := metadata.Metadata{
 		Announce: serverUrl,
-		Info: metadata.MetadataInfo{
+		Info: metadata.Info{
 			InfoHash: [20]byte{1, 2, 3, 4},
 		},
 	}
