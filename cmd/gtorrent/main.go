@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/danferreira/gtorrent/pkg/metadata"
-	"github.com/danferreira/gtorrent/pkg/torrent"
+	"github.com/danferreira/gtorrent/internal/metadata"
+	"github.com/danferreira/gtorrent/internal/torrent"
 )
 
 func main() {

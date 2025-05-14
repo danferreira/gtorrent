@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/danferreira/gtorrent/pkg/metadata"
-	"github.com/danferreira/gtorrent/pkg/peers"
-	"github.com/danferreira/gtorrent/pkg/pieces"
-	"github.com/danferreira/gtorrent/pkg/storage"
-	"github.com/danferreira/gtorrent/pkg/tracker"
+	"github.com/danferreira/gtorrent/internal/metadata"
+	"github.com/danferreira/gtorrent/internal/peer"
+	"github.com/danferreira/gtorrent/internal/piece"
+	"github.com/danferreira/gtorrent/internal/storage"
+	"github.com/danferreira/gtorrent/internal/tracker"
 )
 
 type PeerEventType int
@@ -26,19 +26,19 @@ const (
 
 type PeerEvent struct {
 	Type  PeerEventType
-	Peer  *peers.Peer
-	Piece *pieces.PieceDownloaded
+	Peer  *peer.Peer
+	Piece *piece.PieceDownloaded
 }
 
 type Torrent struct {
 	mu             sync.Mutex
 	Metadata       metadata.Metadata
-	Stats          *pieces.TorrentStats
+	Stats          *piece.TorrentStats
 	PeerID         [20]byte
-	connectedPeers map[string]*peers.PeerConnection
+	connectedPeers map[string]*peer.Connection
 	Storage        *storage.Storage
 	SeedingOnly    bool
-	Bitfield       *pieces.Bitfield
+	Bitfield       *piece.Bitfield
 }
 
 func (t *Torrent) Run() error {
@@ -52,28 +52,28 @@ func (t *Torrent) Run() error {
 	}
 	t.Storage = storage
 
-	t.Stats = &pieces.TorrentStats{
+	t.Stats = &piece.TorrentStats{
 		Downloaded: 0,
 		Uploaded:   0,
 		Left:       int64(torrentSize),
 	}
 	bitfieldSize := int(math.Ceil(float64(len(pieceHashes)) / 8))
-	bitfield := make(pieces.Bitfield, bitfieldSize)
+	bitfield := make(piece.Bitfield, bitfieldSize)
 	t.Bitfield = &bitfield
 
-	piecesChan := make(chan *pieces.PieceWork, len(pieceHashes))
+	piecesChan := make(chan *piece.PieceWork, len(pieceHashes))
 	t.checkLocalFiles(piecesChan)
 	if len(piecesChan) == 0 {
 		fmt.Println("Nothing to download. Seeding mode")
 		t.SeedingOnly = true
 	}
 
-	t.connectedPeers = make(map[string]*peers.PeerConnection)
+	t.connectedPeers = make(map[string]*peer.Connection)
 
-	peersChan := make(chan []peers.Peer)
+	peersChan := make(chan []peer.Peer)
 	announceChan := make(chan tracker.Event)
 
-	resultChan := make(chan pieces.PieceDownloaded)
+	resultChan := make(chan piece.PieceDownloaded)
 	doneChan := make(chan bool)
 
 	if err := t.ListenForPeers(resultChan, piecesChan, doneChan); err != nil {
@@ -130,7 +130,7 @@ func (t *Torrent) Run() error {
 	}
 }
 
-func (t *Torrent) ListenForPeers(resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, done chan bool) error {
+func (t *Torrent) ListenForPeers(resultChan chan piece.PieceDownloaded, piecesChan chan *piece.PieceWork, done chan bool) error {
 	fmt.Println("Listen for connections")
 	ln, err := net.Listen("tcp4", ":6881")
 	if err != nil {
@@ -151,14 +151,14 @@ func (t *Torrent) ListenForPeers(resultChan chan pieces.PieceDownloaded, piecesC
 	return nil
 }
 
-func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
+func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan piece.PieceDownloaded, piecesChan chan *piece.PieceWork, doneChan chan bool) {
 	fmt.Println("New peer connection:", conn.RemoteAddr().String())
-	peer := peers.Peer{
+	p := peer.Peer{
 		Addr: conn.RemoteAddr().String(),
 	}
 
-	pc := &peers.PeerConnection{
-		Peer:        &peer,
+	pc := &peer.Connection{
+		Peer:        &p,
 		InfoHash:    t.Metadata.Info.InfoHash,
 		PeerID:      t.PeerID,
 		OwnBitfield: t.Bitfield,
@@ -178,9 +178,9 @@ func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan pieces.PieceDownloa
 
 }
 
-func (t *Torrent) newPeerWorker(peer peers.Peer, resultChan chan pieces.PieceDownloaded, piecesChan chan *pieces.PieceWork, doneChan chan bool) {
-	pc := &peers.PeerConnection{
-		Peer:        &peer,
+func (t *Torrent) newPeerWorker(p peer.Peer, resultChan chan piece.PieceDownloaded, piecesChan chan *piece.PieceWork, doneChan chan bool) {
+	pc := &peer.Connection{
+		Peer:        &p,
 		InfoHash:    t.Metadata.Info.InfoHash,
 		PeerID:      t.PeerID,
 		Storage:     t.Storage,
@@ -190,7 +190,7 @@ func (t *Torrent) newPeerWorker(peer peers.Peer, resultChan chan pieces.PieceDow
 	if err := pc.Connect(); err != nil {
 		fmt.Println("Error during connection: ", err)
 
-		fmt.Printf("Removing %s from list of connected peers\n", peer.Addr)
+		fmt.Printf("Removing %s from list of connected peers\n", p.Addr)
 		return
 	}
 
@@ -199,11 +199,11 @@ func (t *Torrent) newPeerWorker(peer peers.Peer, resultChan chan pieces.PieceDow
 	err := pc.ExchangeMessages(piecesChan, resultChan, doneChan)
 	if err != nil {
 		fmt.Println("Error when exchanging messages with peer", err)
-		t.removeConnectedPeer(&peer)
+		t.removeConnectedPeer(&p)
 	}
 }
 
-func (t *Torrent) announceWorker(peersChan chan []peers.Peer, announceChan chan tracker.Event) {
+func (t *Torrent) announceWorker(peersChan chan []peer.Peer, announceChan chan tracker.Event) {
 	fmt.Println("Starting announce worker")
 
 	tkr := tracker.Tracker{
@@ -251,7 +251,7 @@ func (t *Torrent) announceWorker(peersChan chan []peers.Peer, announceChan chan 
 	}
 }
 
-func (t *Torrent) checkLocalFiles(piecesChan chan<- *pieces.PieceWork) {
+func (t *Torrent) checkLocalFiles(piecesChan chan<- *piece.PieceWork) {
 	pieceHashes := t.Metadata.Info.Pieces
 	pieceLength := t.Metadata.Info.PieceLength
 	torrentSize := t.Metadata.Info.TotalLength()
@@ -279,7 +279,7 @@ func (t *Torrent) checkLocalFiles(piecesChan chan<- *pieces.PieceWork) {
 			continue
 		}
 
-		piecesChan <- &pieces.PieceWork{Index: index, Hash: ph, Length: actualPieceLength}
+		piecesChan <- &piece.PieceWork{Index: index, Hash: ph, Length: actualPieceLength}
 	}
 }
 
@@ -288,13 +288,13 @@ func (t *Torrent) checkIntegrity(expectedHash [20]byte, data []byte) bool {
 	return bytes.Equal(hash[:], expectedHash[:])
 }
 
-func (t *Torrent) addConnectedPeer(pc *peers.PeerConnection) {
+func (t *Torrent) addConnectedPeer(pc *peer.Connection) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.connectedPeers[pc.Peer.Addr] = pc
 }
 
-func (t *Torrent) removeConnectedPeer(peer *peers.Peer) {
+func (t *Torrent) removeConnectedPeer(peer *peer.Peer) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.connectedPeers, peer.Addr)

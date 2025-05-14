@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/danferreira/gtorrent/pkg/metadata"
+	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/stretchr/testify/assert"
 )
 

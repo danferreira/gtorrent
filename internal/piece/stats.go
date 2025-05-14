@@ -1,4 +1,4 @@
-package pieces
+package piece
 
 import (
 	"sync"

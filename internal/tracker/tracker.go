@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/danferreira/gtorrent/pkg/metadata"
-	"github.com/danferreira/gtorrent/pkg/peers"
+	"github.com/danferreira/gtorrent/internal/metadata"
+	"github.com/danferreira/gtorrent/internal/peer"
 	"github.com/jackpal/bencode-go"
 )
 
@@ -33,7 +33,7 @@ type Tracker struct {
 	PeerID   [20]byte
 }
 
-func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peers.Peer, int, error) {
+func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
 	params := url.Values{
 		"info_hash":  []string{string(t.Metadata.Info.InfoHash[:])},
 		"peer_id":    []string{string(t.PeerID[:])},
@@ -73,10 +73,10 @@ func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peers.P
 	peersResp := []byte(trackerResp.Peers)
 	chunks := slices.Collect(slices.Chunk(peersResp, 6))
 
-	discoveredPeers := make([]peers.Peer, 0, len(chunks))
+	discoveredPeers := make([]peer.Peer, 0, len(chunks))
 
 	for _, p := range chunks {
-		peerv, err := peers.Unmarshal(p)
+		peerv, err := peer.Unmarshal(p)
 		if err != nil {
 			continue
 		}

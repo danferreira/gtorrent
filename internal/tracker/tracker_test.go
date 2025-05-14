@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/danferreira/gtorrent/pkg/metadata"
-	"github.com/danferreira/gtorrent/pkg/peers"
+	"github.com/danferreira/gtorrent/internal/metadata"
+	"github.com/danferreira/gtorrent/internal/peer"
 	"github.com/jackpal/bencode-go"
 	"github.com/stretchr/testify/assert"
 )
@@ -56,7 +56,7 @@ func TestTrackerAnnounce(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, 1800, interval)
 	assert.Equal(t, 2, len(gotPeers))
-	assert.Equal(t, []peers.Peer{{
+	assert.Equal(t, []peer.Peer{{
 		Addr: "127.0.0.1:6881",
 	}, {
 		Addr: "192.168.0.10:6969",

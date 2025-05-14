@@ -1,4 +1,4 @@
-package peers
+package peer
 
 import (
 	"bytes"
@@ -12,16 +12,16 @@ import (
 	"slices"
 	"time"
 
-	"github.com/danferreira/gtorrent/pkg/handshake"
-	"github.com/danferreira/gtorrent/pkg/message"
-	"github.com/danferreira/gtorrent/pkg/pieces"
-	"github.com/danferreira/gtorrent/pkg/storage"
+	"github.com/danferreira/gtorrent/internal/handshake"
+	"github.com/danferreira/gtorrent/internal/message"
+	"github.com/danferreira/gtorrent/internal/piece"
+	"github.com/danferreira/gtorrent/internal/storage"
 )
 
 const BlockSize = 16 * 1024 // 16 KB
 const MaxRequests = 30
 
-type PeerConnection struct {
+type Connection struct {
 	Peer               *Peer
 	InfoHash           [20]byte
 	PeerID             [20]byte
@@ -30,14 +30,14 @@ type PeerConnection struct {
 	PeerChokedUs       bool
 	PeerInterestedUs   bool
 	Conn               net.Conn
-	PeerBitfield       pieces.Bitfield
-	OwnBitfield        *pieces.Bitfield
+	PeerBitfield       piece.Bitfield
+	OwnBitfield        *piece.Bitfield
 	CanReceiveBitfield bool
 	PieceLength        int
 	Storage            *storage.Storage
 }
 
-func (pc *PeerConnection) AcceptConnection(conn net.Conn) error {
+func (pc *Connection) AcceptConnection(conn net.Conn) error {
 	pc.Conn = conn
 	err := pc.receiveHandshake(conn)
 	if err != nil {
@@ -55,7 +55,7 @@ func (pc *PeerConnection) AcceptConnection(conn net.Conn) error {
 	return pc.sendBitfield()
 }
 
-func (pc *PeerConnection) Connect() error {
+func (pc *Connection) Connect() error {
 	conn, err := net.DialTimeout("tcp4", pc.Peer.Addr, 5*time.Second)
 	if err != nil {
 		fmt.Println("Error: ", err)
@@ -81,11 +81,11 @@ func (pc *PeerConnection) Connect() error {
 	return nil
 }
 
-func (pc *PeerConnection) ExchangeMessages(piecesChan chan *pieces.PieceWork, resultChan chan pieces.PieceDownloaded, done <-chan bool) error {
+func (pc *Connection) ExchangeMessages(piecesChan chan *piece.PieceWork, resultChan chan piece.PieceDownloaded, done <-chan bool) error {
 	requests := 0
 
 	type pendingPiece struct {
-		pw   *pieces.PieceWork
+		pw   *piece.PieceWork
 		data map[int][]byte
 	}
 
@@ -167,7 +167,7 @@ outerLoop:
 						piecesChan <- pendingPiece.pw
 					}
 
-					resultChan <- pieces.PieceDownloaded{
+					resultChan <- piece.PieceDownloaded{
 						Index: block.index,
 						Data:  r,
 						PW:    *pendingPiece.pw,
@@ -181,12 +181,12 @@ outerLoop:
 	return nil
 }
 
-func (pc *PeerConnection) checkIntegrity(expectedHash [20]byte, data []byte) bool {
+func (pc *Connection) checkIntegrity(expectedHash [20]byte, data []byte) bool {
 	hash := sha1.Sum(data)
 	return bytes.Equal(hash[:], expectedHash[:])
 }
 
-func (pc *PeerConnection) sendHandshake(conn io.Writer) error {
+func (pc *Connection) sendHandshake(conn io.Writer) error {
 	h := handshake.Handshake{
 		InfoHash: pc.InfoHash,
 		PeerID:   pc.PeerID,
@@ -195,7 +195,7 @@ func (pc *PeerConnection) sendHandshake(conn io.Writer) error {
 	return h.Write(conn)
 }
 
-func (pc *PeerConnection) receiveHandshake(conn io.Reader) error {
+func (pc *Connection) receiveHandshake(conn io.Reader) error {
 	h, err := handshake.Read(conn)
 	if err != nil {
 		return err
@@ -214,7 +214,7 @@ type block struct {
 	data   []byte
 }
 
-func (pc *PeerConnection) handleMessage(m *message.Message) (*block, error) {
+func (pc *Connection) handleMessage(m *message.Message) (*block, error) {
 	if m == nil {
 		fmt.Println("Keep Alive")
 		return nil, nil
@@ -295,7 +295,7 @@ func (pc *PeerConnection) handleMessage(m *message.Message) (*block, error) {
 	return nil, nil
 }
 
-func (pc *PeerConnection) sendInterested() error {
+func (pc *Connection) sendInterested() error {
 	fmt.Println("Sending interest")
 	m := message.Message{
 		ID: message.MessageInterested,
@@ -312,13 +312,13 @@ func (pc *PeerConnection) sendInterested() error {
 	return nil
 }
 
-func (pc *PeerConnection) sendRequest(index, begin, length int) error {
+func (pc *Connection) sendRequest(index, begin, length int) error {
 	m := message.NewRequest(index, begin, length)
 	_, err := pc.Conn.Write(m.Serialize())
 	return err
 }
 
-func (pc *PeerConnection) sendBitfield() error {
+func (pc *Connection) sendBitfield() error {
 	fmt.Println("Sending bitfield")
 	m := message.Message{
 		ID:      message.MessageBitfield,
@@ -328,7 +328,7 @@ func (pc *PeerConnection) sendBitfield() error {
 	return err
 }
 
-func (pc *PeerConnection) sendUnchoke() error {
+func (pc *Connection) sendUnchoke() error {
 	m := message.Message{
 		ID: message.MessageUnchoke,
 	}
@@ -336,12 +336,12 @@ func (pc *PeerConnection) sendUnchoke() error {
 	return err
 }
 
-func (pc *PeerConnection) sendPiece(index, begin int, data []byte) error {
+func (pc *Connection) sendPiece(index, begin int, data []byte) error {
 	m := message.NewPiece(index, begin, data)
 	_, err := pc.Conn.Write(m.Serialize())
 	return err
 }
-func (pc *PeerConnection) SendHave(index int) error {
+func (pc *Connection) SendHave(index int) error {
 	m := message.NewHave(index)
 	_, err := pc.Conn.Write(m.Serialize())
 	return err

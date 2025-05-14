@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/danferreira/gtorrent/pkg/metadata"
+	"github.com/danferreira/gtorrent/internal/metadata"
 )
 
 type File struct {

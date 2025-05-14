@@ -1,4 +1,4 @@
-package peers
+package peer
 
 import (
 	"bytes"
@@ -51,7 +51,7 @@ func TestConnect(t *testing.T) {
 		Addr: net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port)),
 	}
 
-	pc := PeerConnection{
+	pc := Connection{
 		Peer:     &peer,
 		InfoHash: InfoHash,
 		PeerID:   PeerID,
