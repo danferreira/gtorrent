@@ -101,7 +101,7 @@ func NewHave(index int) Message {
 	binary.BigEndian.PutUint32(buff, uint32(index))
 
 	return Message{
-		ID:      MessagePiece,
+		ID:      MessageHave,
 		Payload: buff,
 	}
 }
