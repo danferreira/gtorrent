@@ -2,8 +2,9 @@ package torrent
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
-	"fmt"
+	"log/slog"
 	"math"
 	"net"
 	"sync"
@@ -39,9 +40,10 @@ type Torrent struct {
 	Storage        *storage.Storage
 	SeedingOnly    bool
 	Bitfield       *piece.Bitfield
+	StatsChan      chan<- piece.TorrentStats
 }
 
-func (t *Torrent) Run() error {
+func (t *Torrent) Run(ctx context.Context) error {
 	pieceHashes := t.Metadata.Info.Pieces
 	pieceLength := t.Metadata.Info.PieceLength
 	torrentSize := t.Metadata.Info.TotalLength()
@@ -56,6 +58,7 @@ func (t *Torrent) Run() error {
 		Downloaded: 0,
 		Uploaded:   0,
 		Left:       int64(torrentSize),
+		Size:       int64(torrentSize),
 	}
 	bitfieldSize := int(math.Ceil(float64(len(pieceHashes)) / 8))
 	bitfield := make(piece.Bitfield, bitfieldSize)
@@ -64,7 +67,7 @@ func (t *Torrent) Run() error {
 	piecesChan := make(chan *piece.PieceWork, len(pieceHashes))
 	t.checkLocalFiles(piecesChan)
 	if len(piecesChan) == 0 {
-		fmt.Println("Nothing to download. Seeding mode")
+		slog.Info("Nothing to download. Seeding mode")
 		t.SeedingOnly = true
 	}
 
@@ -87,7 +90,7 @@ func (t *Torrent) Run() error {
 		case pd := <-resultChan:
 			start := pd.Index * pieceLength
 			if err := t.Storage.Write(start, pd.Data); err != nil {
-				fmt.Println("Error writing piece to disk: ", err)
+				slog.Error("Error writing piece to disk", "error", err)
 				piecesChan <- &pd.PW
 				continue
 			}
@@ -96,10 +99,8 @@ func (t *Torrent) Run() error {
 			t.broadcastHavePiece(pd.Index)
 
 			t.Stats.UpdateDownloaded(int64(len(pd.Data)))
-			downloaded, _, left := t.Stats.GetSnapshot()
-
-			percent := (float64(downloaded) / float64(torrentSize)) * 100
-			fmt.Printf("Downloading:  %.2f%% of %d from %d peers\n", percent, torrentSize, len(t.connectedPeers))
+			_, _, left, _ := t.Stats.GetSnapshot()
+			t.StatsChan <- *t.Stats
 
 			if left == 0 {
 				_ = t.Storage.CloseFiles()
@@ -109,29 +110,30 @@ func (t *Torrent) Run() error {
 			}
 		case ps := <-peersChan:
 			if !t.SeedingOnly {
-				fmt.Println("Connecting to peers")
+				slog.Info("Connecting to peers")
 				for _, peer := range ps {
 					peerAddr := peer.Addr
-					fmt.Println("Peer Addr", peerAddr)
 					if peerAddr == "127.0.0.1:6881" {
-						fmt.Printf("Own address. Skipping...")
+						slog.Info("Own address. Skipping...")
 						continue
 					}
 
 					if _, connected := t.connectedPeers[peerAddr]; connected {
-						fmt.Printf("Peer %s is already connected\n", peerAddr)
+						slog.Info("Peer is already connected", "peer", peerAddr)
 						continue
 					}
 
 					go t.newPeerWorker(peer, resultChan, piecesChan, doneChan)
 				}
 			}
+		case <-ctx.Done():
+			return nil
 		}
 	}
 }
 
 func (t *Torrent) ListenForPeers(resultChan chan piece.PieceDownloaded, piecesChan chan *piece.PieceWork, done chan bool) error {
-	fmt.Println("Listen for connections")
+	slog.Info("Listen for connections")
 	ln, err := net.Listen("tcp4", ":6881")
 	if err != nil {
 		return err
@@ -141,7 +143,7 @@ func (t *Torrent) ListenForPeers(resultChan chan piece.PieceDownloaded, piecesCh
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				fmt.Println("Error during accepting new conn: ", err)
+				slog.Error("Error during accepting new conn", "error", err)
 				continue
 			}
 			go t.newPeerConn(conn, resultChan, piecesChan, done)
@@ -152,7 +154,7 @@ func (t *Torrent) ListenForPeers(resultChan chan piece.PieceDownloaded, piecesCh
 }
 
 func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan piece.PieceDownloaded, piecesChan chan *piece.PieceWork, doneChan chan bool) {
-	fmt.Println("New peer connection:", conn.RemoteAddr().String())
+	slog.Info("New peer connection", "peer", conn.RemoteAddr().String())
 	p := peer.Peer{
 		Addr: conn.RemoteAddr().String(),
 	}
@@ -168,12 +170,12 @@ func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan piece.PieceDownload
 
 	err := pc.AcceptConnection(conn)
 	if err != nil {
-		fmt.Println("Error when accepting connection", err)
+		slog.Error("Error when accepting connection", "error", err)
 	}
 
 	err = pc.ExchangeMessages(piecesChan, resultChan, doneChan)
 	if err != nil {
-		fmt.Println("Error when exchanging messages with peer", err)
+		slog.Error("Error when exchanging messages with peer", "error", err)
 	}
 
 }
@@ -188,9 +190,8 @@ func (t *Torrent) newPeerWorker(p peer.Peer, resultChan chan piece.PieceDownload
 	}
 
 	if err := pc.Connect(); err != nil {
-		fmt.Println("Error during connection: ", err)
-
-		fmt.Printf("Removing %s from list of connected peers\n", p.Addr)
+		slog.Error("Error during connection", "error", err)
+		slog.Info("Removing from list of connected peers", "peer", p.Addr)
 		return
 	}
 
@@ -198,13 +199,13 @@ func (t *Torrent) newPeerWorker(p peer.Peer, resultChan chan piece.PieceDownload
 
 	err := pc.ExchangeMessages(piecesChan, resultChan, doneChan)
 	if err != nil {
-		fmt.Println("Error when exchanging messages with peer", err)
+		slog.Error("Error when exchanging messages with peer", "error", err)
 		t.removeConnectedPeer(&p)
 	}
 }
 
 func (t *Torrent) announceWorker(peersChan chan []peer.Peer, announceChan chan tracker.Event) {
-	fmt.Println("Starting announce worker")
+	slog.Info("Starting announce worker")
 
 	tkr := tracker.Tracker{
 		Metadata: t.Metadata,
@@ -212,13 +213,14 @@ func (t *Torrent) announceWorker(peersChan chan []peer.Peer, announceChan chan t
 	}
 
 	currentEvent := tracker.EventStarted
-	downloaded, uploaded, left := t.Stats.GetSnapshot()
+	downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
 	receivedPeers, interval, err := tkr.Announce(tracker.EventStarted, downloaded, uploaded, left)
 	if err != nil {
-		fmt.Println("An error occurred while trying to call tracker. Retrying in 10s.\nError: ", err)
+		slog.Warn("An error occurred while trying to call tracker.", "error", err)
+		slog.Info("Retrying in 10s.")
 		interval = 10
 	} else {
-		fmt.Println("Successfully announced to tracker")
+		slog.Info("Successfully announced to tracker")
 		currentEvent = tracker.EventUpdated
 
 		peersChan <- receivedPeers
@@ -230,17 +232,17 @@ func (t *Torrent) announceWorker(peersChan chan []peer.Peer, announceChan chan t
 	for {
 		select {
 		case event := <-announceChan:
-			fmt.Printf("Send %s event to tracker\n", event)
-			downloaded, uploaded, left := t.Stats.GetSnapshot()
+			slog.Debug("Sending event to tracker", "event", event)
+			downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
 			_, _, _ = tkr.Announce(event, downloaded, uploaded, left)
-			fmt.Printf("Event %s sent\n", event)
+			slog.Debug("Event sent", "event", event)
 		case <-ticker.C:
-			downloaded, uploaded, left = t.Stats.GetSnapshot()
+			downloaded, uploaded, left, _ = t.Stats.GetSnapshot()
 			receivedPeers, interval, err := tkr.Announce(currentEvent, downloaded, uploaded, left)
 			if err != nil {
-				fmt.Println("Error on tracker announce:", err)
+				slog.Error("Error on tracker announce", "error", err)
 			} else {
-				fmt.Println("Successfully announced to tracker")
+				slog.Info("Successfully announced to tracker")
 				currentEvent = tracker.EventUpdated
 				ticker.Reset(time.Duration(interval) * time.Second)
 
@@ -257,7 +259,7 @@ func (t *Torrent) checkLocalFiles(piecesChan chan<- *piece.PieceWork) {
 	torrentSize := t.Metadata.Info.TotalLength()
 	storage := t.Storage
 
-	fmt.Println("Checking files on disk...")
+	slog.Info("Checking files on disk...")
 	for index, ph := range pieceHashes {
 		begin := index * pieceLength
 		end := begin + pieceLength
@@ -270,7 +272,7 @@ func (t *Torrent) checkLocalFiles(piecesChan chan<- *piece.PieceWork) {
 
 		data, err := storage.Read(begin, actualPieceLength)
 		if err != nil {
-			fmt.Println("Disk check error: ", err)
+			slog.Error("Disk check error", "error", err)
 		} else if t.checkIntegrity(ph, data) {
 			t.Bitfield.SetPiece(index)
 			amount := int64(len(data))
@@ -305,7 +307,7 @@ func (t *Torrent) broadcastHavePiece(index int) {
 	defer t.mu.Unlock()
 	for _, pc := range t.connectedPeers {
 		if err := pc.SendHave(index); err != nil {
-			fmt.Println("Error sending Have message to peer: ", err)
+			slog.Error("Error sending Have message to peer", "error", err)
 		}
 	}
 }

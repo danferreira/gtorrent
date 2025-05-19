@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 )
 
 type MessageID uint8
@@ -54,7 +55,7 @@ func Read(reader io.Reader) (*Message, error) {
 	length := binary.BigEndian.Uint32(msgLen)
 
 	if length == 0 {
-		fmt.Println("Received Keep Alive message")
+		slog.Info("Received Keep Alive message")
 
 		return nil, nil
 	}

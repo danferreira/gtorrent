@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"errors"
-	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"math"
 	"net"
@@ -50,7 +50,7 @@ func (pc *Connection) AcceptConnection(conn net.Conn) error {
 
 	pc.PeerIsChoked = true
 
-	fmt.Println("Peer connected: ", pc.Peer.Addr)
+	slog.Info("Peer connected", "peer", pc.Peer.Addr)
 
 	return pc.sendBitfield()
 }
@@ -58,7 +58,7 @@ func (pc *Connection) AcceptConnection(conn net.Conn) error {
 func (pc *Connection) Connect() error {
 	conn, err := net.DialTimeout("tcp4", pc.Peer.Addr, 5*time.Second)
 	if err != nil {
-		fmt.Println("Error: ", err)
+		slog.Error("Error during connection", "error", err)
 		return err
 	}
 
@@ -72,7 +72,7 @@ func (pc *Connection) Connect() error {
 		return err
 	}
 
-	fmt.Println("Peer connected: ", pc.Peer.Addr)
+	slog.Info("Peer connected", "peer", pc.Peer.Addr)
 
 	pc.Conn = conn
 	pc.PeerChokedUs = true
@@ -95,7 +95,7 @@ outerLoop:
 	for {
 		select {
 		case <-done:
-			fmt.Println("Quitting...Should send a close message to peer")
+			slog.Info("Quitting...Should send a close message to peer")
 			break outerLoop
 		default:
 			if !pc.PeerChokedUs && pc.PeerInterestedUs && requests < MaxRequests {
@@ -116,7 +116,7 @@ outerLoop:
 
 							err := pc.sendRequest(pw.Index, offset, blockSize)
 							if err != nil {
-								fmt.Println("Error: ", err)
+								slog.Error("Error", "error", err)
 								piecesChan <- pw
 								break
 							}
@@ -128,18 +128,16 @@ outerLoop:
 							requests++
 						}
 					} else {
-						fmt.Println("Peer has not this piece")
 						piecesChan <- pw
 					}
 
 				default:
-					// fmt.Println("There is no more pieces to download")
 				}
 			}
 
 			msg, err := message.Read(pc.Conn)
 			if err != nil {
-				fmt.Println("Error: ", err)
+				slog.Error("Error", "error", err)
 				return err
 			}
 
@@ -163,7 +161,7 @@ outerLoop:
 					}
 
 					if !pc.checkIntegrity(pendingPiece.pw.Hash, r) {
-						fmt.Println("Invalid piece hash. Sending it back...")
+						slog.Warn("Invalid piece hash. Sending it back...")
 						piecesChan <- pendingPiece.pw
 					}
 
@@ -172,6 +170,7 @@ outerLoop:
 						Data:  r,
 						PW:    *pendingPiece.pw,
 					}
+
 				}
 
 			}
@@ -216,29 +215,29 @@ type block struct {
 
 func (pc *Connection) handleMessage(m *message.Message) (*block, error) {
 	if m == nil {
-		fmt.Println("Keep Alive")
+		slog.Debug("Keep Alive")
 		return nil, nil
 	}
 	switch m.ID {
 	case message.MessageChoke:
-		fmt.Println("Peer Choked us")
+		slog.Debug("Peer Choked us")
 		pc.PeerChokedUs = true
 	case message.MessageUnchoke:
-		fmt.Println("Peer Unchoked us")
+		slog.Debug("Peer Unchoked us")
 		pc.PeerChokedUs = false
 	case message.MessageInterested:
-		fmt.Println("Peer is interested on us")
+		slog.Debug("Peer is interested on us")
 		pc.PeerIsInterested = true
 		if err := pc.sendUnchoke(); err != nil {
-			fmt.Println("Error on sending unchoke", err)
+			slog.Error("Error on sending unchoke", "error", err)
 			return nil, nil
 		}
 		pc.PeerIsChoked = false
 	case message.MessageNotInterest:
-		fmt.Println("Peer is not interested on us")
+		slog.Info("Peer is not interested on us")
 		pc.PeerIsInterested = false
 	case message.MessageHave:
-		fmt.Println("Peer have a piece")
+		slog.Info("Peer have a piece")
 		index := m.ParseAsHave()
 		pc.PeerBitfield.SetPiece(index)
 		if !pc.PeerIsInterested && !pc.OwnBitfield.HasPiece(index) {
@@ -246,36 +245,36 @@ func (pc *Connection) handleMessage(m *message.Message) (*block, error) {
 		}
 
 	case message.MessageBitfield:
-		fmt.Println("Peer sent bitfield")
+		slog.Info("Peer sent bitfield")
 		if !pc.CanReceiveBitfield {
 			return nil, errors.New("late bitfield received")
 		}
 		pc.PeerBitfield = m.Payload
 		pc.sendInterested()
 	case message.MessageRequest:
-		fmt.Println("Peer ask for a piece")
+		slog.Info("Peer ask for a piece")
 
 		if pc.PeerIsChoked {
-			fmt.Println("Peer is choked. Should wait until unchoked")
+			slog.Info("Peer is choked. Should wait until unchoked")
 			return nil, nil
 		}
 
 		m, err := m.ParseAsRequest()
 		if err != nil {
-			fmt.Println("Error parsing request message:", err)
+			slog.Error("Error parsing request message", "error", err)
 			return nil, nil
 		}
 
 		// read data from local storage
 		data, err := pc.Storage.Read((int(m.Index)*pc.PieceLength)+int(m.Begin), int(m.Length))
 		if err != nil {
-			fmt.Println("Error reading piece from storage:", err)
+			slog.Error("Error reading piece from storage", "error", err)
 			return nil, nil
 		}
 
 		err = pc.sendPiece(int(m.Index), int(m.Begin), data)
 		if err != nil {
-			fmt.Println("Error when sending piece to peer", err)
+			slog.Error("Error when sending piece to peer", "error", err)
 			return nil, nil
 		}
 
@@ -287,23 +286,23 @@ func (pc *Connection) handleMessage(m *message.Message) (*block, error) {
 			data:   data,
 		}, nil
 	case message.MessageCancel:
-		fmt.Println("Peer wants to cancel")
+		slog.Info("Peer wants to cancel")
 	default:
-		fmt.Printf("ID: %d Not implemented yet", m.ID)
+		slog.Info("Message ID not implemented yet", "id", m.ID)
 	}
 
 	return nil, nil
 }
 
 func (pc *Connection) sendInterested() error {
-	fmt.Println("Sending interest")
+	slog.Info("Sending interest")
 	m := message.Message{
 		ID: message.MessageInterested,
 	}
 	_, err := pc.Conn.Write(m.Serialize())
 
 	if err != nil {
-		fmt.Println("Error on sending interest", err)
+		slog.Error("Error on sending interest", "error", err)
 		return err
 	}
 
@@ -319,7 +318,7 @@ func (pc *Connection) sendRequest(index, begin, length int) error {
 }
 
 func (pc *Connection) sendBitfield() error {
-	fmt.Println("Sending bitfield")
+	slog.Info("Sending bitfield")
 	m := message.Message{
 		ID:      message.MessageBitfield,
 		Payload: *pc.OwnBitfield,

@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -82,7 +83,7 @@ func (s *Storage) Read(start int, length int) ([]byte, error) {
 		_, err = file.File.ReadAt(chunk, int64(actualStart))
 
 		if err != nil {
-			fmt.Println(err)
+			slog.Error("An error occurred", "error", err)
 			return nil, err
 		}
 		buffer.Write(chunk)
