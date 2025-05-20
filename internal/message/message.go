@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -47,13 +48,14 @@ func (m *Message) Serialize() []byte {
 
 func Read(reader io.Reader) (*Message, error) {
 	msgLen := make([]byte, 4)
-	_, err := io.ReadFull(reader, msgLen)
-	if err != nil {
-		return nil, fmt.Errorf("buffer is too short: %w", err)
+	if _, err := io.ReadFull(reader, msgLen); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, io.EOF
+		}
+		return nil, fmt.Errorf("read length: %w", err)
 	}
 
 	length := binary.BigEndian.Uint32(msgLen)
-
 	if length == 0 {
 		slog.Info("Received Keep Alive message")
 
@@ -61,10 +63,12 @@ func Read(reader io.Reader) (*Message, error) {
 	}
 
 	payload := make([]byte, length)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, io.ErrUnexpectedEOF
+		}
 
-	_, err = io.ReadFull(reader, payload)
-	if err != nil {
-		return nil, fmt.Errorf("payload is too short: %w", err)
+		return nil, fmt.Errorf("read payload: %w", err)
 	}
 
 	return &Message{

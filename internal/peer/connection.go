@@ -39,18 +39,9 @@ type Connection struct {
 
 func (pc *Connection) AcceptConnection(conn net.Conn) error {
 	pc.Conn = conn
-	err := pc.receiveHandshake(conn)
-	if err != nil {
-		return err
-	}
-	err = pc.sendHandshake(conn)
-	if err != nil {
-		return err
-	}
+	slog.Info("Peer connected", "peer", pc.Peer.Addr)
 
 	pc.PeerIsChoked = true
-
-	slog.Info("Peer connected", "peer", pc.Peer.Addr)
 
 	return pc.sendBitfield()
 }
@@ -137,7 +128,12 @@ outerLoop:
 
 			msg, err := message.Read(pc.Conn)
 			if err != nil {
-				slog.Error("Error", "error", err)
+				if errors.Is(err, io.EOF) {
+					slog.Info("peer closed", "peer", pc.Peer.Addr)
+					return nil
+				}
+				slog.Error("read error", "err", err)
+
 				return err
 			}
 
@@ -163,6 +159,8 @@ outerLoop:
 					if !pc.checkIntegrity(pendingPiece.pw.Hash, r) {
 						slog.Warn("Invalid piece hash. Sending it back...")
 						piecesChan <- pendingPiece.pw
+
+						continue
 					}
 
 					resultChan <- piece.PieceDownloaded{
@@ -170,7 +168,6 @@ outerLoop:
 						Data:  r,
 						PW:    *pendingPiece.pw,
 					}
-
 				}
 
 			}

@@ -41,6 +41,12 @@ type Torrent struct {
 	SeedingOnly    bool
 	Bitfield       *piece.Bitfield
 	StatsChan      chan<- piece.TorrentStats
+
+	peersChan    chan []peer.Peer
+	piecesChan   chan *piece.PieceWork
+	resultChan   chan piece.PieceDownloaded
+	announceChan chan tracker.Event
+	doneChan     chan bool
 }
 
 func (t *Torrent) Run(ctx context.Context) error {
@@ -64,34 +70,30 @@ func (t *Torrent) Run(ctx context.Context) error {
 	bitfield := make(piece.Bitfield, bitfieldSize)
 	t.Bitfield = &bitfield
 
-	piecesChan := make(chan *piece.PieceWork, len(pieceHashes))
-	t.checkLocalFiles(piecesChan)
-	if len(piecesChan) == 0 {
+	t.piecesChan = make(chan *piece.PieceWork, len(pieceHashes))
+	t.checkLocalFiles(t.piecesChan)
+	if len(t.piecesChan) == 0 {
 		slog.Info("Nothing to download. Seeding mode")
 		t.SeedingOnly = true
 	}
 
 	t.connectedPeers = make(map[string]*peer.Connection)
 
-	peersChan := make(chan []peer.Peer)
-	announceChan := make(chan tracker.Event)
+	t.peersChan = make(chan []peer.Peer)
+	t.announceChan = make(chan tracker.Event)
 
-	resultChan := make(chan piece.PieceDownloaded)
-	doneChan := make(chan bool)
+	t.resultChan = make(chan piece.PieceDownloaded)
+	t.doneChan = make(chan bool)
 
-	if err := t.ListenForPeers(resultChan, piecesChan, doneChan); err != nil {
-		return err
-	}
-
-	go t.announceWorker(peersChan, announceChan)
+	go t.announceWorker()
 
 	for {
 		select {
-		case pd := <-resultChan:
+		case pd := <-t.resultChan:
 			start := pd.Index * pieceLength
 			if err := t.Storage.Write(start, pd.Data); err != nil {
 				slog.Error("Error writing piece to disk", "error", err)
-				piecesChan <- &pd.PW
+				t.piecesChan <- &pd.PW
 				continue
 			}
 
@@ -104,11 +106,11 @@ func (t *Torrent) Run(ctx context.Context) error {
 
 			if left == 0 {
 				_ = t.Storage.CloseFiles()
-				announceChan <- tracker.EventCompleted
+				t.announceChan <- tracker.EventCompleted
 				t.SeedingOnly = true
-				close(doneChan)
+				close(t.doneChan)
 			}
-		case ps := <-peersChan:
+		case ps := <-t.peersChan:
 			if !t.SeedingOnly {
 				slog.Info("Connecting to peers")
 				for _, peer := range ps {
@@ -123,37 +125,17 @@ func (t *Torrent) Run(ctx context.Context) error {
 						continue
 					}
 
-					go t.newPeerWorker(peer, resultChan, piecesChan, doneChan)
+					go t.newPeerWorker(peer)
 				}
 			}
 		case <-ctx.Done():
+			slog.Info("Context done")
 			return nil
 		}
 	}
 }
 
-func (t *Torrent) ListenForPeers(resultChan chan piece.PieceDownloaded, piecesChan chan *piece.PieceWork, done chan bool) error {
-	slog.Info("Listen for connections")
-	ln, err := net.Listen("tcp4", ":6881")
-	if err != nil {
-		return err
-	}
-
-	go func(ln net.Listener) {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				slog.Error("Error during accepting new conn", "error", err)
-				continue
-			}
-			go t.newPeerConn(conn, resultChan, piecesChan, done)
-		}
-	}(ln)
-
-	return nil
-}
-
-func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan piece.PieceDownloaded, piecesChan chan *piece.PieceWork, doneChan chan bool) {
+func (t *Torrent) NewPeerConn(conn net.Conn) {
 	slog.Info("New peer connection", "peer", conn.RemoteAddr().String())
 	p := peer.Peer{
 		Addr: conn.RemoteAddr().String(),
@@ -173,14 +155,14 @@ func (t *Torrent) newPeerConn(conn net.Conn, resultChan chan piece.PieceDownload
 		slog.Error("Error when accepting connection", "error", err)
 	}
 
-	err = pc.ExchangeMessages(piecesChan, resultChan, doneChan)
+	err = pc.ExchangeMessages(t.piecesChan, t.resultChan, t.doneChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 	}
 
 }
 
-func (t *Torrent) newPeerWorker(p peer.Peer, resultChan chan piece.PieceDownloaded, piecesChan chan *piece.PieceWork, doneChan chan bool) {
+func (t *Torrent) newPeerWorker(p peer.Peer) {
 	pc := &peer.Connection{
 		Peer:        &p,
 		InfoHash:    t.Metadata.Info.InfoHash,
@@ -197,14 +179,14 @@ func (t *Torrent) newPeerWorker(p peer.Peer, resultChan chan piece.PieceDownload
 
 	t.addConnectedPeer(pc)
 
-	err := pc.ExchangeMessages(piecesChan, resultChan, doneChan)
+	err := pc.ExchangeMessages(t.piecesChan, t.resultChan, t.doneChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 		t.removeConnectedPeer(&p)
 	}
 }
 
-func (t *Torrent) announceWorker(peersChan chan []peer.Peer, announceChan chan tracker.Event) {
+func (t *Torrent) announceWorker() {
 	slog.Info("Starting announce worker")
 
 	tkr := tracker.Tracker{
@@ -223,7 +205,7 @@ func (t *Torrent) announceWorker(peersChan chan []peer.Peer, announceChan chan t
 		slog.Info("Successfully announced to tracker")
 		currentEvent = tracker.EventUpdated
 
-		peersChan <- receivedPeers
+		t.peersChan <- receivedPeers
 	}
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
@@ -231,7 +213,7 @@ func (t *Torrent) announceWorker(peersChan chan []peer.Peer, announceChan chan t
 
 	for {
 		select {
-		case event := <-announceChan:
+		case event := <-t.announceChan:
 			slog.Debug("Sending event to tracker", "event", event)
 			downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
 			_, _, _ = tkr.Announce(event, downloaded, uploaded, left)
@@ -246,7 +228,7 @@ func (t *Torrent) announceWorker(peersChan chan []peer.Peer, announceChan chan t
 				currentEvent = tracker.EventUpdated
 				ticker.Reset(time.Duration(interval) * time.Second)
 
-				peersChan <- receivedPeers
+				t.peersChan <- receivedPeers
 
 			}
 		}
