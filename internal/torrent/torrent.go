@@ -25,6 +25,8 @@ const (
 	EventPieceDownloaded
 )
 
+const DefaultPort = 6881
+
 type PeerEvent struct {
 	Type  PeerEventType
 	Peer  *peer.Peer
@@ -101,7 +103,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 		t.SeedingOnly = true
 	}
 
-	go t.announceWorker()
+	go t.announceWorker(ctx)
 
 	for {
 		select {
@@ -202,14 +204,14 @@ func (t *Torrent) newPeerWorker(p peer.Peer) {
 	}
 }
 
-func (t *Torrent) announceWorker() {
+func (t *Torrent) announceWorker(ctx context.Context) {
 	slog.Info("Starting announce worker")
 
-	tkr := tracker.NewTracker(&t.Metadata, t.PeerID)
+	tkr := tracker.NewTracker(&t.Metadata, t.PeerID, DefaultPort)
 
 	currentEvent := tracker.EventStarted
 	downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
-	receivedPeers, interval, err := tkr.Announce(tracker.EventStarted, downloaded, uploaded, left)
+	receivedPeers, interval, err := tkr.Announce(ctx, tracker.EventStarted, downloaded, uploaded, left)
 	if err != nil {
 		slog.Warn("An error occurred while trying to call tracker.", "error", err)
 		slog.Info("Retrying in 10s.")
@@ -229,11 +231,11 @@ func (t *Torrent) announceWorker() {
 		case event := <-t.announceChan:
 			slog.Debug("Sending event to tracker", "event", event)
 			downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
-			_, _, _ = tkr.Announce(event, downloaded, uploaded, left)
+			_, _, _ = tkr.Announce(ctx, event, downloaded, uploaded, left)
 			slog.Debug("Event sent", "event", event)
 		case <-ticker.C:
 			downloaded, uploaded, left, _ = t.Stats.GetSnapshot()
-			receivedPeers, interval, err := tkr.Announce(currentEvent, downloaded, uploaded, left)
+			receivedPeers, interval, err := tkr.Announce(ctx, currentEvent, downloaded, uploaded, left)
 			if err != nil {
 				slog.Error("Error on tracker announce", "error", err)
 			} else {

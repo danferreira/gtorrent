@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,20 +32,29 @@ type rawResponse struct {
 type Tracker struct {
 	metadata *metadata.Metadata
 	peerID   [20]byte
+	port     int
+	client   *http.Client
 }
 
-func NewTracker(m *metadata.Metadata, peerID [20]byte) *Tracker {
-	return &Tracker{
-		metadata: m,
-		peerID:   peerID,
+func NewTracker(m *metadata.Metadata, peerID [20]byte, listenPort int) *Tracker {
+	tr := &Tracker{metadata: m, peerID: peerID, port: listenPort}
+	myDialer := net.Dialer{}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return myDialer.DialContext(ctx, "tcp4", addr)
 	}
+
+	tr.client = &http.Client{Timeout: 15 * time.Second, Transport: transport}
+
+	return tr
 }
 
-func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
+func (t *Tracker) Announce(ctx context.Context, e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
 	params := url.Values{
-		"info_hash":  []string{string(t.metadata.Info.InfoHash[:])},
-		"peer_id":    []string{string(t.peerID[:])},
-		"port":       []string{strconv.Itoa(6881)},
+		"info_hash":  []string{url.QueryEscape(string(t.metadata.Info.InfoHash[:]))},
+		"peer_id":    []string{url.QueryEscape(string(t.peerID[:]))},
+		"port":       []string{strconv.Itoa(t.port)},
 		"downloaded": []string{strconv.FormatInt(downloaded, 10)},
 		"uploaded":   []string{strconv.FormatInt(uploaded, 10)},
 		"left":       []string{strconv.FormatInt(left, 10)},
@@ -57,16 +67,19 @@ func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peer.Pe
 
 	url := t.metadata.Announce
 	url.RawQuery = params.Encode()
-	myDialer := net.Dialer{}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
-		return myDialer.DialContext(ctx, "tcp4", addr)
-	}
-	c := &http.Client{Timeout: 15 * time.Second, Transport: transport}
-	resp, err := c.Get(url.String())
+	r, err := http.NewRequestWithContext(ctx, http.MethodGet, url.String(), nil)
 	if err != nil {
 		return nil, 0, err
+	}
+
+	resp, err := t.client.Do(r)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, fmt.Errorf("tracker HTTP %d", resp.StatusCode)
 	}
 
 	defer resp.Body.Close()

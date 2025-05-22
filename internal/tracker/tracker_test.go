@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -46,12 +47,10 @@ func TestTrackerAnnounce(t *testing.T) {
 		},
 	}
 
-	tr := Tracker{
-		metadata: testMetadata,
-		peerID:   [20]byte{1, 2, 3, 4},
-	}
+	peerID := [20]byte{1, 2, 3, 4}
+	tr := NewTracker(testMetadata, peerID, 6881)
 
-	gotPeers, interval, err := tr.Announce(EventStarted, 0, 0, 0)
+	gotPeers, interval, err := tr.Announce(context.Background(), EventStarted, 0, 0, 0)
 
 	assert.Nil(t, err)
 	assert.Equal(t, 1800, interval)
