@@ -1,4 +1,4 @@
-package client
+package torrent
 
 import (
 	"context"
@@ -12,7 +12,6 @@ import (
 	"github.com/danferreira/gtorrent/internal/handshake"
 	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/danferreira/gtorrent/internal/piece"
-	"github.com/danferreira/gtorrent/internal/torrent"
 )
 
 type Client struct {
@@ -20,7 +19,7 @@ type Client struct {
 
 	PeerID [20]byte
 
-	torrents map[[20]byte]*torrent.Torrent
+	torrents map[[20]byte]*Torrent
 
 	statsIn  chan piece.TorrentStats
 	statsOut chan piece.TorrentStats
@@ -35,7 +34,7 @@ func NewClient() *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &Client{
-		torrents: make(map[[20]byte]*torrent.Torrent),
+		torrents: make(map[[20]byte]*Torrent),
 		PeerID:   generatePeerID(),
 		statsIn:  in,
 		statsOut: out,
@@ -62,7 +61,7 @@ func (c *Client) AddFile(path string) {
 		return
 	}
 
-	t, err := torrent.NewTorrent(m, c.PeerID)
+	t, err := NewTorrent(m, c.PeerID)
 	if err != nil {
 		slog.Error("Cannot add torrent", "path", path)
 		log.Fatal(err)

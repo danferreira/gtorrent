@@ -242,7 +242,6 @@ func (t *Torrent) announceWorker() {
 				ticker.Reset(time.Duration(interval) * time.Second)
 
 				t.peersChan <- receivedPeers
-
 			}
 		}
 	}
