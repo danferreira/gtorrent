@@ -49,41 +49,57 @@ type Torrent struct {
 	doneChan     chan bool
 }
 
-func (t *Torrent) Run(ctx context.Context) error {
-	pieceHashes := t.Metadata.Info.Pieces
-	pieceLength := t.Metadata.Info.PieceLength
-	torrentSize := t.Metadata.Info.TotalLength()
-
-	storage, err := storage.NewStorage(t.Metadata.Info.Files)
+func NewTorrent(m *metadata.Metadata, peerID [20]byte) (*Torrent, error) {
+	storage, err := storage.NewStorage(m.Info.Files)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	t.Storage = storage
 
-	t.Stats = &piece.TorrentStats{
+	torrentSize := m.Info.TotalLength()
+	stats := &piece.TorrentStats{
 		Downloaded: 0,
 		Uploaded:   0,
 		Left:       int64(torrentSize),
 		Size:       int64(torrentSize),
 	}
+
+	pieceHashes := m.Info.Pieces
 	bitfieldSize := int(math.Ceil(float64(len(pieceHashes)) / 8))
 	bitfield := make(piece.Bitfield, bitfieldSize)
-	t.Bitfield = &bitfield
 
-	t.piecesChan = make(chan *piece.PieceWork, len(pieceHashes))
-	t.checkLocalFiles(t.piecesChan)
+	piecesChan := make(chan *piece.PieceWork, len(pieceHashes))
+
+	connectedPeers := make(map[string]*peer.Connection)
+
+	peersChan := make(chan []peer.Peer)
+	announceChan := make(chan tracker.Event)
+
+	resultChan := make(chan piece.PieceDownloaded)
+	doneChan := make(chan bool)
+
+	return &Torrent{
+		Metadata:       *m,
+		PeerID:         peerID,
+		Storage:        storage,
+		Stats:          stats,
+		Bitfield:       &bitfield,
+		piecesChan:     piecesChan,
+		connectedPeers: connectedPeers,
+		peersChan:      peersChan,
+		announceChan:   announceChan,
+		resultChan:     resultChan,
+		doneChan:       doneChan,
+	}, nil
+}
+
+func (t *Torrent) Start(ctx context.Context) error {
+	pieceLength := t.Metadata.Info.PieceLength
+
+	t.checkLocalFiles()
 	if len(t.piecesChan) == 0 {
 		slog.Info("Nothing to download. Seeding mode")
 		t.SeedingOnly = true
 	}
-
-	t.connectedPeers = make(map[string]*peer.Connection)
-
-	t.peersChan = make(chan []peer.Peer)
-	t.announceChan = make(chan tracker.Event)
-
-	t.resultChan = make(chan piece.PieceDownloaded)
-	t.doneChan = make(chan bool)
 
 	go t.announceWorker()
 
@@ -189,10 +205,7 @@ func (t *Torrent) newPeerWorker(p peer.Peer) {
 func (t *Torrent) announceWorker() {
 	slog.Info("Starting announce worker")
 
-	tkr := tracker.Tracker{
-		Metadata: t.Metadata,
-		PeerID:   t.PeerID,
-	}
+	tkr := tracker.NewTracker(&t.Metadata, t.PeerID)
 
 	currentEvent := tracker.EventStarted
 	downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
@@ -235,7 +248,7 @@ func (t *Torrent) announceWorker() {
 	}
 }
 
-func (t *Torrent) checkLocalFiles(piecesChan chan<- *piece.PieceWork) {
+func (t *Torrent) checkLocalFiles() {
 	pieceHashes := t.Metadata.Info.Pieces
 	pieceLength := t.Metadata.Info.PieceLength
 	torrentSize := t.Metadata.Info.TotalLength()
@@ -263,7 +276,7 @@ func (t *Torrent) checkLocalFiles(piecesChan chan<- *piece.PieceWork) {
 			continue
 		}
 
-		piecesChan <- &piece.PieceWork{Index: index, Hash: ph, Length: actualPieceLength}
+		t.piecesChan <- &piece.PieceWork{Index: index, Hash: ph, Length: actualPieceLength}
 	}
 }
 

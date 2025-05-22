@@ -29,14 +29,21 @@ type rawResponse struct {
 }
 
 type Tracker struct {
-	Metadata metadata.Metadata
-	PeerID   [20]byte
+	metadata *metadata.Metadata
+	peerID   [20]byte
+}
+
+func NewTracker(m *metadata.Metadata, peerID [20]byte) *Tracker {
+	return &Tracker{
+		metadata: m,
+		peerID:   peerID,
+	}
 }
 
 func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
 	params := url.Values{
-		"info_hash":  []string{string(t.Metadata.Info.InfoHash[:])},
-		"peer_id":    []string{string(t.PeerID[:])},
+		"info_hash":  []string{string(t.metadata.Info.InfoHash[:])},
+		"peer_id":    []string{string(t.peerID[:])},
 		"port":       []string{strconv.Itoa(6881)},
 		"downloaded": []string{strconv.FormatInt(downloaded, 10)},
 		"uploaded":   []string{strconv.FormatInt(uploaded, 10)},
@@ -48,7 +55,7 @@ func (t *Tracker) Announce(e Event, downloaded, uploaded, left int64) ([]peer.Pe
 		params.Add("event", string(e))
 	}
 
-	url := t.Metadata.Announce
+	url := t.metadata.Announce
 	url.RawQuery = params.Encode()
 	myDialer := net.Dialer{}
 

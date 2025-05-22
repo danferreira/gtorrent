@@ -136,3 +136,7 @@ func (t *Info) TotalLength() int {
 
 	return total
 }
+
+func (m *Metadata) InfoHash() [20]byte {
+	return m.Info.InfoHash
+}

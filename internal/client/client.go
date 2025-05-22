@@ -1,7 +1,9 @@
-package engine
+package client
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"log/slog"
 	"net"
@@ -13,10 +15,11 @@ import (
 	"github.com/danferreira/gtorrent/internal/torrent"
 )
 
-type Engine struct {
+type Client struct {
 	mu sync.RWMutex
 
-	peerID   [20]byte
+	PeerID [20]byte
+
 	torrents map[[20]byte]*torrent.Torrent
 
 	statsIn  chan piece.TorrentStats
@@ -26,70 +29,52 @@ type Engine struct {
 	cancel context.CancelFunc
 }
 
-func NewEngine() *Engine {
+func NewClient() *Client {
 	in := make(chan piece.TorrentStats, 64)
 	out := make(chan piece.TorrentStats, 64)
-
-	var peerID [20]byte
-	copy(peerID[:], "-GT0001-abcdefgh1234")
-
 	ctx, cancel := context.WithCancel(context.Background())
 
-	e := &Engine{
+	e := &Client{
 		torrents: make(map[[20]byte]*torrent.Torrent),
-		peerID:   peerID,
+		PeerID:   generatePeerID(),
 		statsIn:  in,
 		statsOut: out,
 		ctx:      ctx,
 		cancel:   cancel,
 	}
-	go e.statsFan()
-	go e.ListenForPeers()
+
 	return e
 }
 
-func (e *Engine) statsFan() {
-	for {
-		select {
-		case snap := <-e.statsIn:
-			select {
-			case e.statsOut <- snap:
-			default:
-			}
-
-		case <-e.ctx.Done(): // <- graceful shutdown
-			return
-		}
-	}
-}
-
-func (e *Engine) Stats() <-chan piece.TorrentStats { return e.statsOut }
-
-func (e *Engine) AddFile(path string) {
+func (c *Client) AddFile(path string) {
 	m, err := metadata.Parse(path)
 	if err != nil {
+		slog.Error("Cannot parse file", "path", path)
 		log.Fatal(err)
 	}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	if _, ok := e.torrents[m.Info.InfoHash]; ok {
+	hash := m.Info.InfoHash
+
+	if _, ok := c.torrents[hash]; ok {
 		return
 	}
 
-	t := torrent.Torrent{
-		Metadata:  *m,
-		PeerID:    e.peerID,
-		StatsChan: e.statsIn,
+	t, err := torrent.NewTorrent(m, c.PeerID)
+	if err != nil {
+		slog.Error("Cannot add torrent", "path", path)
+		log.Fatal(err)
 	}
 
-	go t.Run(e.ctx)
+	go t.Start(c.ctx)
+	go c.statsFan()
 
-	e.torrents[t.Metadata.Info.InfoHash] = &t
+	c.torrents[hash] = t
 }
 
-func (e *Engine) ListenForPeers() error {
+func (c *Client) ListenForPeers() error {
 	slog.Info("Listen for connections")
 	ln, err := net.Listen("tcp4", ":6881")
 	if err != nil {
@@ -103,21 +88,38 @@ func (e *Engine) ListenForPeers() error {
 				slog.Error("Error during accepting new conn", "error", err)
 				continue
 			}
-			go e.connectToPeer(conn)
+			go c.connectToPeer(conn)
 		}
 	}(ln)
 
 	return nil
 }
 
-func (e *Engine) connectToPeer(conn net.Conn) error {
+func (c *Client) statsFan() {
+	for {
+		select {
+		case snap := <-c.statsIn:
+			select {
+			case c.statsOut <- snap:
+			default:
+			}
+
+		case <-c.ctx.Done(): // <- graceful shutdown
+			return
+		}
+	}
+}
+
+func (c *Client) Stats() <-chan piece.TorrentStats { return c.statsOut }
+
+func (c *Client) connectToPeer(conn net.Conn) error {
 	h, err := handshake.Read(conn)
 	if err != nil {
 		return err
 	}
 
 	infoHash := h.InfoHash
-	t, ok := e.torrents[infoHash]
+	t, ok := c.torrents[infoHash]
 	if !ok {
 		slog.Warn("Cannot find any torrent with this hash", "hash", infoHash)
 		return nil
@@ -125,7 +127,7 @@ func (e *Engine) connectToPeer(conn net.Conn) error {
 
 	hs := handshake.Handshake{
 		InfoHash: infoHash,
-		PeerID:   e.peerID,
+		PeerID:   c.PeerID,
 	}
 
 	err = hs.Write(conn)
@@ -136,4 +138,21 @@ func (e *Engine) connectToPeer(conn net.Conn) error {
 	t.NewPeerConn(conn)
 
 	return nil
+}
+
+func generatePeerID() [20]byte {
+	const prefix = "-GT0001-"
+	var id [20]byte
+	copy(id[:], prefix)
+
+	// 12 random bytes -> 24 hex chars, but we need 12 *ASCII* bytes.
+	var tail [12]byte
+	if _, err := rand.Read(tail[:]); err != nil {
+		log.Fatal(err) // rand failure is unrecoverable here
+	}
+
+	// Encode to printable ASCII using hex (2 chars per byte) and take first 12.
+	hex.Encode(id[8:], tail[:6]) // 6 bytes * 2 hex chars = 12 ASCII bytes
+
+	return id
 }

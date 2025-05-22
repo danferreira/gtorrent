@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/danferreira/gtorrent/internal/engine"
+	"github.com/danferreira/gtorrent/internal/client"
 )
 
 func main() {
@@ -18,17 +18,16 @@ func main() {
 	path := flag.String("file", "", "The torrent file")
 	flag.Parse()
 
-	e := engine.NewEngine()
+	c := client.NewClient()
 
-	e.AddFile(*path)
+	c.AddFile(*path)
 
 	for {
 		select {
-		case stats := <-e.Stats():
+		case stats := <-c.Stats():
 			downloaded, _, _, size := stats.GetSnapshot()
 			percent := (float64(downloaded) / float64(size)) * 100
 			fmt.Printf("Downloading:  %.2f%% of %d\n", percent, size)
-
 		}
 	}
 }

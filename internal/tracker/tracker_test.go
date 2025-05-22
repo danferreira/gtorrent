@@ -39,7 +39,7 @@ func TestTrackerAnnounce(t *testing.T) {
 
 	serverUrl, _ := url.Parse(server.URL)
 
-	testMetadata := metadata.Metadata{
+	testMetadata := &metadata.Metadata{
 		Announce: serverUrl,
 		Info: metadata.Info{
 			InfoHash: [20]byte{1, 2, 3, 4},
@@ -47,8 +47,8 @@ func TestTrackerAnnounce(t *testing.T) {
 	}
 
 	tr := Tracker{
-		Metadata: testMetadata,
-		PeerID:   [20]byte{1, 2, 3, 4},
+		metadata: testMetadata,
+		peerID:   [20]byte{1, 2, 3, 4},
 	}
 
 	gotPeers, interval, err := tr.Announce(EventStarted, 0, 0, 0)
