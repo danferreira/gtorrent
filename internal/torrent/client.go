@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -26,6 +27,8 @@ type Client struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	listenPort int
 }
 
 func NewClient() *Client {
@@ -34,22 +37,23 @@ func NewClient() *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &Client{
-		torrents: make(map[[20]byte]*Torrent),
-		PeerID:   generatePeerID(),
-		statsIn:  in,
-		statsOut: out,
-		ctx:      ctx,
-		cancel:   cancel,
+		torrents:   make(map[[20]byte]*Torrent),
+		PeerID:     generatePeerID(),
+		statsIn:    in,
+		statsOut:   out,
+		ctx:        ctx,
+		cancel:     cancel,
+		listenPort: 6881,
 	}
 
 	return e
 }
 
-func (c *Client) AddFile(path string) {
+func (c *Client) AddFile(path string) error {
 	m, err := metadata.Parse(path)
 	if err != nil {
 		slog.Error("Cannot parse file", "path", path)
-		log.Fatal(err)
+		return err
 	}
 
 	c.mu.Lock()
@@ -58,24 +62,26 @@ func (c *Client) AddFile(path string) {
 	hash := m.Info.InfoHash
 
 	if _, ok := c.torrents[hash]; ok {
-		return
+		slog.Warn("Torrent already added", "path", path)
+		return nil
 	}
 
-	t, err := NewTorrent(m, c.PeerID)
+	t, err := NewTorrent(m, c.PeerID, c.listenPort)
 	if err != nil {
 		slog.Error("Cannot add torrent", "path", path)
-		log.Fatal(err)
+		return err
 	}
 
 	go t.Start(c.ctx)
-	go c.statsFan()
 
 	c.torrents[hash] = t
+
+	return nil
 }
 
 func (c *Client) ListenForPeers() error {
 	slog.Info("Listen for connections")
-	ln, err := net.Listen("tcp4", ":6881")
+	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", c.listenPort))
 	if err != nil {
 		return err
 	}

@@ -17,22 +17,6 @@ import (
 	"github.com/danferreira/gtorrent/internal/tracker"
 )
 
-type PeerEventType int
-
-const (
-	EventNewPeer PeerEventType = iota
-	EventPeerDisconnected
-	EventPieceDownloaded
-)
-
-const DefaultPort = 6881
-
-type PeerEvent struct {
-	Type  PeerEventType
-	Peer  *peer.Peer
-	Piece *piece.PieceDownloaded
-}
-
 type Torrent struct {
 	mu             sync.Mutex
 	Metadata       metadata.Metadata
@@ -40,18 +24,19 @@ type Torrent struct {
 	PeerID         [20]byte
 	connectedPeers map[string]*peer.Connection
 	Storage        *storage.Storage
-	SeedingOnly    bool
 	Bitfield       *piece.Bitfield
-	StatsChan      chan<- piece.TorrentStats
+	SeedingOnly    bool
 
-	peersChan    chan []peer.Peer
-	piecesChan   chan *piece.PieceWork
-	resultChan   chan piece.PieceDownloaded
-	announceChan chan tracker.Event
-	doneChan     chan bool
+	piecesChan chan *piece.PieceWork
+	resultChan chan piece.PieceDownloaded
+	doneChan   chan bool
+
+	tracker *tracker.Tracker
+
+	listenPort int
 }
 
-func NewTorrent(m *metadata.Metadata, peerID [20]byte) (*Torrent, error) {
+func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent, error) {
 	storage, err := storage.NewStorage(m.Info.Files)
 	if err != nil {
 		return nil, err
@@ -73,11 +58,10 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte) (*Torrent, error) {
 
 	connectedPeers := make(map[string]*peer.Connection)
 
-	peersChan := make(chan []peer.Peer)
-	announceChan := make(chan tracker.Event)
-
 	resultChan := make(chan piece.PieceDownloaded)
 	doneChan := make(chan bool)
+
+	tracker := tracker.NewTracker(m, peerID, listenPort)
 
 	return &Torrent{
 		Metadata:       *m,
@@ -87,10 +71,10 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte) (*Torrent, error) {
 		Bitfield:       &bitfield,
 		piecesChan:     piecesChan,
 		connectedPeers: connectedPeers,
-		peersChan:      peersChan,
-		announceChan:   announceChan,
 		resultChan:     resultChan,
 		doneChan:       doneChan,
+		listenPort:     listenPort,
+		tracker:        tracker,
 	}, nil
 }
 
@@ -103,7 +87,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 		t.SeedingOnly = true
 	}
 
-	go t.announceWorker(ctx)
+	peerChan := t.announceWorker(ctx)
 
 	for {
 		select {
@@ -120,15 +104,14 @@ func (t *Torrent) Start(ctx context.Context) error {
 
 			t.Stats.UpdateDownloaded(int64(len(pd.Data)))
 			_, _, left, _ := t.Stats.GetSnapshot()
-			t.StatsChan <- *t.Stats
 
 			if left == 0 {
 				_ = t.Storage.CloseFiles()
-				t.announceChan <- tracker.EventCompleted
+				t.sendAnnouncement(ctx, tracker.EventCompleted)
 				t.SeedingOnly = true
 				close(t.doneChan)
 			}
-		case ps := <-t.peersChan:
+		case ps := <-peerChan:
 			if !t.SeedingOnly {
 				slog.Info("Connecting to peers")
 				for _, peer := range ps {
@@ -180,6 +163,25 @@ func (t *Torrent) NewPeerConn(conn net.Conn) {
 
 }
 
+func (t *Torrent) StatsChan() <-chan piece.TorrentStats {
+	statsChann := make(chan piece.TorrentStats)
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				statsChann <- *t.Stats
+			}
+		}
+
+	}()
+
+	return statsChann
+}
+
 func (t *Torrent) newPeerWorker(p peer.Peer) {
 	pc := &peer.Connection{
 		Peer:        &p,
@@ -204,49 +206,49 @@ func (t *Torrent) newPeerWorker(p peer.Peer) {
 	}
 }
 
-func (t *Torrent) announceWorker(ctx context.Context) {
+func (t *Torrent) announceWorker(ctx context.Context) <-chan []peer.Peer {
 	slog.Info("Starting announce worker")
+	peersChan := make(chan []peer.Peer)
 
-	tkr := tracker.NewTracker(&t.Metadata, t.PeerID, DefaultPort)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		defer close(peersChan)
 
-	currentEvent := tracker.EventStarted
-	downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
-	receivedPeers, interval, err := tkr.Announce(ctx, tracker.EventStarted, downloaded, uploaded, left)
-	if err != nil {
-		slog.Warn("An error occurred while trying to call tracker.", "error", err)
-		slog.Info("Retrying in 10s.")
-		interval = 10
-	} else {
-		slog.Info("Successfully announced to tracker")
-		currentEvent = tracker.EventUpdated
+		currentEvent := tracker.EventStarted
+		for {
+			select {
+			case <-ticker.C:
+				receivedPeers, interval, err := t.sendAnnouncement(ctx, currentEvent)
+				if err != nil {
+					slog.Error("Error on tracker announce", "error", err)
+				} else {
+					slog.Info("Successfully announced to tracker")
+					currentEvent = tracker.EventUpdated
+					ticker.Reset(time.Duration(interval) * time.Second)
 
-		t.peersChan <- receivedPeers
-	}
+					peersChan <- receivedPeers
+				}
 
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case event := <-t.announceChan:
-			slog.Debug("Sending event to tracker", "event", event)
-			downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
-			_, _, _ = tkr.Announce(ctx, event, downloaded, uploaded, left)
-			slog.Debug("Event sent", "event", event)
-		case <-ticker.C:
-			downloaded, uploaded, left, _ = t.Stats.GetSnapshot()
-			receivedPeers, interval, err := tkr.Announce(ctx, currentEvent, downloaded, uploaded, left)
-			if err != nil {
-				slog.Error("Error on tracker announce", "error", err)
-			} else {
-				slog.Info("Successfully announced to tracker")
-				currentEvent = tracker.EventUpdated
-				ticker.Reset(time.Duration(interval) * time.Second)
-
-				t.peersChan <- receivedPeers
+			case <-ctx.Done():
+				return
 			}
 		}
+	}()
+
+	return peersChan
+}
+
+func (t *Torrent) sendAnnouncement(ctx context.Context, event tracker.Event) ([]peer.Peer, int, error) {
+	slog.Info("Sending announcement to tracker", "event", event)
+	downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
+	receivedPeers, interval, err := t.tracker.Announce(ctx, event, downloaded, uploaded, left)
+	if err != nil {
+		slog.Error("Error on tracker announce", "error", err)
+		return nil, 0, err
 	}
+
+	return receivedPeers, interval, err
 }
 
 func (t *Torrent) checkLocalFiles() {
