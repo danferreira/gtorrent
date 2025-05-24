@@ -52,8 +52,8 @@ func NewTracker(m *metadata.Metadata, peerID [20]byte, listenPort int) *Tracker 
 
 func (t *Tracker) Announce(ctx context.Context, e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
 	params := url.Values{
-		"info_hash":  []string{url.QueryEscape(string(t.metadata.Info.InfoHash[:]))},
-		"peer_id":    []string{url.QueryEscape(string(t.peerID[:]))},
+		"info_hash":  []string{string(t.metadata.Info.InfoHash[:])},
+		"peer_id":    []string{string(t.peerID[:])},
 		"port":       []string{strconv.Itoa(t.port)},
 		"downloaded": []string{strconv.FormatInt(downloaded, 10)},
 		"uploaded":   []string{strconv.FormatInt(uploaded, 10)},

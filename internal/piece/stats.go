@@ -12,10 +12,17 @@ type TorrentStats struct {
 	Size       int64
 }
 
-func (s *TorrentStats) GetSnapshot() (downloaded, uploaded, left, size int64) {
+type Snapshot struct {
+	Downloaded int64
+	Uploaded   int64
+	Left       int64
+	Size       int64
+}
+
+func (s *TorrentStats) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.Downloaded, s.Uploaded, s.Left, s.Size
+	return Snapshot{s.Downloaded, s.Uploaded, s.Left, s.Size}
 }
 
 func (s *TorrentStats) UpdateDownloaded(amount int64) {

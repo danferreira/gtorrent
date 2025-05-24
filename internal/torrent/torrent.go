@@ -30,7 +30,7 @@ type Torrent struct {
 	piecesChan chan *piece.PieceWork
 	resultChan chan piece.PieceDownloaded
 
-	tracker *tracker.Tracker
+	trackerManager *tracker.Manager
 
 	listenPort int
 }
@@ -59,7 +59,7 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 
 	resultChan := make(chan piece.PieceDownloaded)
 
-	tracker := tracker.NewTracker(m, peerID, listenPort)
+	trackerManager := tracker.NewManager(m, peerID, listenPort)
 
 	return &Torrent{
 		Metadata:       *m,
@@ -70,8 +70,7 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 		piecesChan:     piecesChan,
 		connectedPeers: connectedPeers,
 		resultChan:     resultChan,
-		listenPort:     listenPort,
-		tracker:        tracker,
+		trackerManager: trackerManager,
 	}, nil
 }
 
@@ -84,7 +83,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 		t.SeedingOnly = true
 	}
 
-	peerChan := t.announceWorker(ctx)
+	peersChan := t.trackerManager.Run(ctx, t.Stats.Snapshot)
 
 	for {
 		select {
@@ -100,14 +99,14 @@ func (t *Torrent) Start(ctx context.Context) error {
 			t.broadcastHavePiece(pd.Index)
 
 			t.Stats.UpdateDownloaded(int64(len(pd.Data)))
-			_, _, left, _ := t.Stats.GetSnapshot()
+			snap := t.Stats.Snapshot()
 
-			if left == 0 {
+			if snap.Left == 0 {
 				_ = t.Storage.CloseFiles()
-				t.sendAnnouncement(ctx, tracker.EventCompleted)
+				t.trackerManager.SendAnnouncement(ctx, tracker.EventCompleted, snap)
 				t.SeedingOnly = true
 			}
-		case ps := <-peerChan:
+		case ps := <-peersChan:
 			if !t.SeedingOnly {
 				slog.Info("Connecting to peers")
 				for _, peer := range ps {
@@ -200,51 +199,6 @@ func (t *Torrent) newPeerWorker(ctx context.Context, p peer.Peer) {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 		t.removeConnectedPeer(&p)
 	}
-}
-
-func (t *Torrent) announceWorker(ctx context.Context) <-chan []peer.Peer {
-	slog.Info("Starting announce worker")
-	peersChan := make(chan []peer.Peer)
-
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		defer close(peersChan)
-
-		currentEvent := tracker.EventStarted
-		for {
-			select {
-			case <-ticker.C:
-				receivedPeers, interval, err := t.sendAnnouncement(ctx, currentEvent)
-				if err != nil {
-					slog.Error("Error on tracker announce", "error", err)
-				} else {
-					slog.Info("Successfully announced to tracker")
-					currentEvent = tracker.EventUpdated
-					ticker.Reset(time.Duration(interval) * time.Second)
-
-					peersChan <- receivedPeers
-				}
-
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	return peersChan
-}
-
-func (t *Torrent) sendAnnouncement(ctx context.Context, event tracker.Event) ([]peer.Peer, int, error) {
-	slog.Info("Sending announcement to tracker", "event", event)
-	downloaded, uploaded, left, _ := t.Stats.GetSnapshot()
-	receivedPeers, interval, err := t.tracker.Announce(ctx, event, downloaded, uploaded, left)
-	if err != nil {
-		slog.Error("Error on tracker announce", "error", err)
-		return nil, 0, err
-	}
-
-	return receivedPeers, interval, err
 }
 
 func (t *Torrent) checkLocalFiles() {
