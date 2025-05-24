@@ -2,6 +2,7 @@ package peer
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"errors"
 	"io"
@@ -72,7 +73,7 @@ func (pc *Connection) Connect() error {
 	return nil
 }
 
-func (pc *Connection) ExchangeMessages(piecesChan chan *piece.PieceWork, resultChan chan piece.PieceDownloaded, done <-chan bool) error {
+func (pc *Connection) ExchangeMessages(ctx context.Context, piecesChan chan *piece.PieceWork, resultChan chan piece.PieceDownloaded) error {
 	requests := 0
 
 	type pendingPiece struct {
@@ -82,12 +83,11 @@ func (pc *Connection) ExchangeMessages(piecesChan chan *piece.PieceWork, resultC
 
 	pendingPieces := make(map[int]pendingPiece)
 
-outerLoop:
 	for {
 		select {
-		case <-done:
+		case <-ctx.Done():
 			slog.Info("Quitting...Should send a close message to peer")
-			break outerLoop
+			return nil
 		default:
 			if !pc.PeerChokedUs && pc.PeerInterestedUs && requests < MaxRequests {
 				select {
@@ -173,8 +173,6 @@ outerLoop:
 			}
 		}
 	}
-
-	return nil
 }
 
 func (pc *Connection) checkIntegrity(expectedHash [20]byte, data []byte) bool {

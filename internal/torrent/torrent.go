@@ -29,7 +29,6 @@ type Torrent struct {
 
 	piecesChan chan *piece.PieceWork
 	resultChan chan piece.PieceDownloaded
-	doneChan   chan bool
 
 	tracker *tracker.Tracker
 
@@ -59,7 +58,6 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 	connectedPeers := make(map[string]*peer.Connection)
 
 	resultChan := make(chan piece.PieceDownloaded)
-	doneChan := make(chan bool)
 
 	tracker := tracker.NewTracker(m, peerID, listenPort)
 
@@ -72,7 +70,6 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 		piecesChan:     piecesChan,
 		connectedPeers: connectedPeers,
 		resultChan:     resultChan,
-		doneChan:       doneChan,
 		listenPort:     listenPort,
 		tracker:        tracker,
 	}, nil
@@ -109,7 +106,6 @@ func (t *Torrent) Start(ctx context.Context) error {
 				_ = t.Storage.CloseFiles()
 				t.sendAnnouncement(ctx, tracker.EventCompleted)
 				t.SeedingOnly = true
-				close(t.doneChan)
 			}
 		case ps := <-peerChan:
 			if !t.SeedingOnly {
@@ -126,7 +122,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 						continue
 					}
 
-					go t.newPeerWorker(peer)
+					go t.newPeerWorker(ctx, peer)
 				}
 			}
 		case <-ctx.Done():
@@ -136,7 +132,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 	}
 }
 
-func (t *Torrent) NewPeerConn(conn net.Conn) {
+func (t *Torrent) NewPeerConn(ctx context.Context, conn net.Conn) {
 	slog.Info("New peer connection", "peer", conn.RemoteAddr().String())
 	p := peer.Peer{
 		Addr: conn.RemoteAddr().String(),
@@ -156,7 +152,7 @@ func (t *Torrent) NewPeerConn(conn net.Conn) {
 		slog.Error("Error when accepting connection", "error", err)
 	}
 
-	err = pc.ExchangeMessages(t.piecesChan, t.resultChan, t.doneChan)
+	err = pc.ExchangeMessages(ctx, t.piecesChan, t.resultChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 	}
@@ -182,7 +178,7 @@ func (t *Torrent) StatsChan() <-chan piece.TorrentStats {
 	return statsChann
 }
 
-func (t *Torrent) newPeerWorker(p peer.Peer) {
+func (t *Torrent) newPeerWorker(ctx context.Context, p peer.Peer) {
 	pc := &peer.Connection{
 		Peer:        &p,
 		InfoHash:    t.Metadata.Info.InfoHash,
@@ -199,7 +195,7 @@ func (t *Torrent) newPeerWorker(p peer.Peer) {
 
 	t.addConnectedPeer(pc)
 
-	err := pc.ExchangeMessages(t.piecesChan, t.resultChan, t.doneChan)
+	err := pc.ExchangeMessages(ctx, t.piecesChan, t.resultChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 		t.removeConnectedPeer(&p)

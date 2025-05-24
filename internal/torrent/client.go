@@ -88,12 +88,18 @@ func (c *Client) ListenForPeers() error {
 
 	go func(ln net.Listener) {
 		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				slog.Error("Error during accepting new conn", "error", err)
-				continue
+			select {
+			case <-c.ctx.Done():
+				ln.Close()
+				return
+			default:
+				conn, err := ln.Accept()
+				if err != nil {
+					slog.Error("Error during accepting new conn", "error", err)
+					continue
+				}
+				go c.connectToPeer(conn)
 			}
-			go c.connectToPeer(conn)
 		}
 	}(ln)
 
@@ -140,7 +146,7 @@ func (c *Client) connectToPeer(conn net.Conn) error {
 		return err
 	}
 
-	t.NewPeerConn(conn)
+	t.NewPeerConn(c.ctx, conn)
 
 	return nil
 }
