@@ -73,7 +73,7 @@ func (pc *Connection) Connect() error {
 	return nil
 }
 
-func (pc *Connection) ExchangeMessages(ctx context.Context, piecesChan chan *piece.PieceWork, resultChan chan piece.PieceDownloaded) error {
+func (pc *Connection) ExchangeMessages(ctx context.Context, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) error {
 	requests := 0
 
 	type pendingPiece struct {
@@ -91,7 +91,7 @@ func (pc *Connection) ExchangeMessages(ctx context.Context, piecesChan chan *pie
 		default:
 			if !pc.PeerChokedUs && pc.PeerInterestedUs && requests < MaxRequests {
 				select {
-				case pw := <-piecesChan:
+				case pw := <-workChan:
 					if pc.PeerBitfield.HasPiece(pw.Index) {
 						numBlocks := int(math.Ceil(float64(pw.Length) / BlockSize))
 
@@ -108,7 +108,7 @@ func (pc *Connection) ExchangeMessages(ctx context.Context, piecesChan chan *pie
 							err := pc.sendRequest(pw.Index, offset, blockSize)
 							if err != nil {
 								slog.Error("Error", "error", err)
-								piecesChan <- pw
+								failChan <- pw
 								break
 							}
 							pendingPieces[pw.Index] = pendingPiece{
@@ -119,7 +119,7 @@ func (pc *Connection) ExchangeMessages(ctx context.Context, piecesChan chan *pie
 							requests++
 						}
 					} else {
-						piecesChan <- pw
+						failChan <- pw
 					}
 
 				default:
@@ -158,12 +158,12 @@ func (pc *Connection) ExchangeMessages(ctx context.Context, piecesChan chan *pie
 
 					if !pc.checkIntegrity(pendingPiece.pw.Hash, r) {
 						slog.Warn("Invalid piece hash. Sending it back...")
-						piecesChan <- pendingPiece.pw
+						failChan <- pendingPiece.pw
 
 						continue
 					}
 
-					resultChan <- piece.PieceDownloaded{
+					resultChan <- &piece.PieceDownloaded{
 						Index: block.index,
 						Data:  r,
 						PW:    *pendingPiece.pw,

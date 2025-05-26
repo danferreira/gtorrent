@@ -130,7 +130,7 @@ func (c *Client) connectToPeer(conn net.Conn) error {
 	}
 
 	infoHash := h.InfoHash
-	t, ok := c.torrents[infoHash]
+	_, ok := c.torrents[infoHash]
 	if !ok {
 		slog.Warn("Cannot find any torrent with this hash", "hash", infoHash)
 		return nil
@@ -146,7 +146,7 @@ func (c *Client) connectToPeer(conn net.Conn) error {
 		return err
 	}
 
-	t.NewPeerConn(c.ctx, conn)
+	// t.NewPeerConn(c.ctx, conn)
 
 	return nil
 }

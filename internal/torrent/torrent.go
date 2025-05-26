@@ -1,11 +1,8 @@
 package torrent
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha1"
 	"log/slog"
-	"math"
 	"net"
 	"sync"
 	"time"
@@ -13,7 +10,6 @@ import (
 	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/danferreira/gtorrent/internal/peer"
 	"github.com/danferreira/gtorrent/internal/piece"
-	"github.com/danferreira/gtorrent/internal/storage"
 	"github.com/danferreira/gtorrent/internal/tracker"
 )
 
@@ -23,24 +19,15 @@ type Torrent struct {
 	Stats          *piece.TorrentStats
 	PeerID         [20]byte
 	connectedPeers map[string]*peer.Connection
-	Storage        *storage.Storage
-	Bitfield       *piece.Bitfield
 	SeedingOnly    bool
 
-	piecesChan chan *piece.PieceWork
-	resultChan chan piece.PieceDownloaded
-
 	trackerManager *tracker.Manager
+	pieceManager   *piece.Manager
 
 	listenPort int
 }
 
 func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent, error) {
-	storage, err := storage.NewStorage(m.Info.Files)
-	if err != nil {
-		return nil, err
-	}
-
 	torrentSize := m.Info.TotalLength()
 	stats := &piece.TorrentStats{
 		Downloaded: 0,
@@ -49,63 +36,27 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 		Size:       int64(torrentSize),
 	}
 
-	pieceHashes := m.Info.Pieces
-	bitfieldSize := int(math.Ceil(float64(len(pieceHashes)) / 8))
-	bitfield := make(piece.Bitfield, bitfieldSize)
-
-	piecesChan := make(chan *piece.PieceWork, len(pieceHashes))
-
 	connectedPeers := make(map[string]*peer.Connection)
 
-	resultChan := make(chan piece.PieceDownloaded)
-
 	trackerManager := tracker.NewManager(m, peerID, listenPort)
+	pieceManager := piece.NewManager(m)
 
 	return &Torrent{
 		Metadata:       *m,
 		PeerID:         peerID,
-		Storage:        storage,
 		Stats:          stats,
-		Bitfield:       &bitfield,
-		piecesChan:     piecesChan,
 		connectedPeers: connectedPeers,
-		resultChan:     resultChan,
 		trackerManager: trackerManager,
+		pieceManager:   pieceManager,
 	}, nil
 }
 
 func (t *Torrent) Start(ctx context.Context) error {
-	pieceLength := t.Metadata.Info.PieceLength
-
-	t.checkLocalFiles()
-	if len(t.piecesChan) == 0 {
-		slog.Info("Nothing to download. Seeding mode")
-		t.SeedingOnly = true
-	}
-
 	peersChan := t.trackerManager.Run(ctx, t.Stats.Snapshot)
+	workChan, failChan, resultChan := t.pieceManager.Run(ctx)
 
 	for {
 		select {
-		case pd := <-t.resultChan:
-			start := pd.Index * pieceLength
-			if err := t.Storage.Write(start, pd.Data); err != nil {
-				slog.Error("Error writing piece to disk", "error", err)
-				t.piecesChan <- &pd.PW
-				continue
-			}
-
-			t.Bitfield.SetPiece(pd.Index)
-			t.broadcastHavePiece(pd.Index)
-
-			t.Stats.UpdateDownloaded(int64(len(pd.Data)))
-			snap := t.Stats.Snapshot()
-
-			if snap.Left == 0 {
-				_ = t.Storage.CloseFiles()
-				t.trackerManager.SendAnnouncement(ctx, tracker.EventCompleted, snap)
-				t.SeedingOnly = true
-			}
 		case ps := <-peersChan:
 			if !t.SeedingOnly {
 				slog.Info("Connecting to peers")
@@ -121,7 +72,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 						continue
 					}
 
-					go t.newPeerWorker(ctx, peer)
+					go t.newPeerWorker(ctx, peer, workChan, failChan, resultChan)
 				}
 			}
 		case <-ctx.Done():
@@ -131,7 +82,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 	}
 }
 
-func (t *Torrent) NewPeerConn(ctx context.Context, conn net.Conn) {
+func (t *Torrent) NewPeerConn(ctx context.Context, conn net.Conn, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
 	slog.Info("New peer connection", "peer", conn.RemoteAddr().String())
 	p := peer.Peer{
 		Addr: conn.RemoteAddr().String(),
@@ -141,8 +92,6 @@ func (t *Torrent) NewPeerConn(ctx context.Context, conn net.Conn) {
 		Peer:        &p,
 		InfoHash:    t.Metadata.Info.InfoHash,
 		PeerID:      t.PeerID,
-		OwnBitfield: t.Bitfield,
-		Storage:     t.Storage,
 		PieceLength: t.Metadata.Info.PieceLength,
 	}
 
@@ -151,7 +100,7 @@ func (t *Torrent) NewPeerConn(ctx context.Context, conn net.Conn) {
 		slog.Error("Error when accepting connection", "error", err)
 	}
 
-	err = pc.ExchangeMessages(ctx, t.piecesChan, t.resultChan)
+	err = pc.ExchangeMessages(ctx, workChan, failChan, resultChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 	}
@@ -177,12 +126,11 @@ func (t *Torrent) StatsChan() <-chan piece.TorrentStats {
 	return statsChann
 }
 
-func (t *Torrent) newPeerWorker(ctx context.Context, p peer.Peer) {
+func (t *Torrent) newPeerWorker(ctx context.Context, p peer.Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
 	pc := &peer.Connection{
 		Peer:        &p,
 		InfoHash:    t.Metadata.Info.InfoHash,
 		PeerID:      t.PeerID,
-		Storage:     t.Storage,
 		PieceLength: t.Metadata.Info.PieceLength,
 	}
 
@@ -194,48 +142,11 @@ func (t *Torrent) newPeerWorker(ctx context.Context, p peer.Peer) {
 
 	t.addConnectedPeer(pc)
 
-	err := pc.ExchangeMessages(ctx, t.piecesChan, t.resultChan)
+	err := pc.ExchangeMessages(ctx, workChan, failChan, resultChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 		t.removeConnectedPeer(&p)
 	}
-}
-
-func (t *Torrent) checkLocalFiles() {
-	pieceHashes := t.Metadata.Info.Pieces
-	pieceLength := t.Metadata.Info.PieceLength
-	torrentSize := t.Metadata.Info.TotalLength()
-	storage := t.Storage
-
-	slog.Info("Checking files on disk...")
-	for index, ph := range pieceHashes {
-		begin := index * pieceLength
-		end := begin + pieceLength
-
-		if end > torrentSize {
-			end = torrentSize
-		}
-
-		actualPieceLength := end - begin
-
-		data, err := storage.Read(begin, actualPieceLength)
-		if err != nil {
-			slog.Error("Disk check error", "error", err)
-		} else if t.checkIntegrity(ph, data) {
-			t.Bitfield.SetPiece(index)
-			amount := int64(len(data))
-			t.Stats.Downloaded += amount
-			t.Stats.Left -= amount
-			continue
-		}
-
-		t.piecesChan <- &piece.PieceWork{Index: index, Hash: ph, Length: actualPieceLength}
-	}
-}
-
-func (t *Torrent) checkIntegrity(expectedHash [20]byte, data []byte) bool {
-	hash := sha1.Sum(data)
-	return bytes.Equal(hash[:], expectedHash[:])
 }
 
 func (t *Torrent) addConnectedPeer(pc *peer.Connection) {
@@ -250,12 +161,12 @@ func (t *Torrent) removeConnectedPeer(peer *peer.Peer) {
 	delete(t.connectedPeers, peer.Addr)
 }
 
-func (t *Torrent) broadcastHavePiece(index int) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, pc := range t.connectedPeers {
-		if err := pc.SendHave(index); err != nil {
-			slog.Error("Error sending Have message to peer", "error", err)
-		}
-	}
-}
+// func (t *Torrent) broadcastHavePiece(index int) {
+// 	t.mu.Lock()
+// 	defer t.mu.Unlock()
+// 	for _, pc := range t.connectedPeers {
+// 		if err := pc.SendHave(index); err != nil {
+// 			slog.Error("Error sending Have message to peer", "error", err)
+// 		}
+// 	}
+// }
