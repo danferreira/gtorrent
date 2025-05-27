@@ -14,15 +14,17 @@ import (
 )
 
 type Torrent struct {
-	mu             sync.Mutex
-	Metadata       metadata.Metadata
-	Stats          *piece.TorrentStats
-	PeerID         [20]byte
-	connectedPeers map[string]*peer.Connection
-	SeedingOnly    bool
+	mu          sync.Mutex
+	Metadata    metadata.Metadata
+	Stats       *piece.TorrentStats
+	PeerID      [20]byte
+	SeedingOnly bool
+
+	inboundConnections chan net.Conn
 
 	trackerManager *tracker.Manager
 	pieceManager   *piece.Manager
+	peerManager    *peer.Manager
 
 	listenPort int
 }
@@ -36,18 +38,20 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 		Size:       int64(torrentSize),
 	}
 
-	connectedPeers := make(map[string]*peer.Connection)
-
 	trackerManager := tracker.NewManager(m, peerID, listenPort)
 	pieceManager := piece.NewManager(m)
+	peerManager := peer.NewManager(m, peerID)
+
+	inboundConnections := make(chan net.Conn)
 
 	return &Torrent{
-		Metadata:       *m,
-		PeerID:         peerID,
-		Stats:          stats,
-		connectedPeers: connectedPeers,
-		trackerManager: trackerManager,
-		pieceManager:   pieceManager,
+		Metadata:           *m,
+		PeerID:             peerID,
+		Stats:              stats,
+		trackerManager:     trackerManager,
+		pieceManager:       pieceManager,
+		peerManager:        peerManager,
+		inboundConnections: inboundConnections,
 	}, nil
 }
 
@@ -55,8 +59,11 @@ func (t *Torrent) Start(ctx context.Context) error {
 	peersChan := t.trackerManager.Run(ctx, t.Stats.Snapshot)
 	workChan, failChan, resultChan := t.pieceManager.Run(ctx)
 
+	defer close(t.inboundConnections)
 	for {
 		select {
+		case c := <-t.inboundConnections:
+			go t.peerManager.InboundConnection(ctx, c, workChan, failChan, resultChan)
 		case ps := <-peersChan:
 			if !t.SeedingOnly {
 				slog.Info("Connecting to peers")
@@ -67,12 +74,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 						continue
 					}
 
-					if _, connected := t.connectedPeers[peerAddr]; connected {
-						slog.Info("Peer is already connected", "peer", peerAddr)
-						continue
-					}
-
-					go t.newPeerWorker(ctx, peer, workChan, failChan, resultChan)
+					go t.peerManager.OutboundConnection(ctx, peer, workChan, failChan, resultChan)
 				}
 			}
 		case <-ctx.Done():
@@ -82,29 +84,8 @@ func (t *Torrent) Start(ctx context.Context) error {
 	}
 }
 
-func (t *Torrent) NewPeerConn(ctx context.Context, conn net.Conn, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
-	slog.Info("New peer connection", "peer", conn.RemoteAddr().String())
-	p := peer.Peer{
-		Addr: conn.RemoteAddr().String(),
-	}
-
-	pc := &peer.Connection{
-		Peer:        &p,
-		InfoHash:    t.Metadata.Info.InfoHash,
-		PeerID:      t.PeerID,
-		PieceLength: t.Metadata.Info.PieceLength,
-	}
-
-	err := pc.AcceptConnection(conn)
-	if err != nil {
-		slog.Error("Error when accepting connection", "error", err)
-	}
-
-	err = pc.ExchangeMessages(ctx, workChan, failChan, resultChan)
-	if err != nil {
-		slog.Error("Error when exchanging messages with peer", "error", err)
-	}
-
+func (t *Torrent) NewInboundConnection(conn net.Conn) {
+	t.inboundConnections <- conn
 }
 
 func (t *Torrent) StatsChan() <-chan piece.TorrentStats {
@@ -124,41 +105,6 @@ func (t *Torrent) StatsChan() <-chan piece.TorrentStats {
 	}()
 
 	return statsChann
-}
-
-func (t *Torrent) newPeerWorker(ctx context.Context, p peer.Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
-	pc := &peer.Connection{
-		Peer:        &p,
-		InfoHash:    t.Metadata.Info.InfoHash,
-		PeerID:      t.PeerID,
-		PieceLength: t.Metadata.Info.PieceLength,
-	}
-
-	if err := pc.Connect(); err != nil {
-		slog.Error("Error during connection", "error", err)
-		slog.Info("Removing from list of connected peers", "peer", p.Addr)
-		return
-	}
-
-	t.addConnectedPeer(pc)
-
-	err := pc.ExchangeMessages(ctx, workChan, failChan, resultChan)
-	if err != nil {
-		slog.Error("Error when exchanging messages with peer", "error", err)
-		t.removeConnectedPeer(&p)
-	}
-}
-
-func (t *Torrent) addConnectedPeer(pc *peer.Connection) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.connectedPeers[pc.Peer.Addr] = pc
-}
-
-func (t *Torrent) removeConnectedPeer(peer *peer.Peer) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.connectedPeers, peer.Addr)
 }
 
 // func (t *Torrent) broadcastHavePiece(index int) {

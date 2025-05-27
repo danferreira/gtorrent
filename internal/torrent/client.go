@@ -79,18 +79,20 @@ func (c *Client) AddFile(path string) error {
 	return nil
 }
 
-func (c *Client) ListenForPeers() error {
-	slog.Info("Listen for connections")
+func (c *Client) ListenForInboundPeers() error {
+	slog.Info("Listening for incoming peers", "port", c.listenPort)
+
 	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", c.listenPort))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to start listener: %w", err)
 	}
 
-	go func(ln net.Listener) {
+	go func() {
+		defer ln.Close()
+
 		for {
 			select {
 			case <-c.ctx.Done():
-				ln.Close()
 				return
 			default:
 				conn, err := ln.Accept()
@@ -98,10 +100,12 @@ func (c *Client) ListenForPeers() error {
 					slog.Error("Error during accepting new conn", "error", err)
 					continue
 				}
-				go c.connectToPeer(conn)
+				go func() {
+					c.connectToPeer(conn)
+				}()
 			}
 		}
-	}(ln)
+	}()
 
 	return nil
 }
@@ -130,23 +134,16 @@ func (c *Client) connectToPeer(conn net.Conn) error {
 	}
 
 	infoHash := h.InfoHash
-	_, ok := c.torrents[infoHash]
+	c.mu.RLock()
+	t, ok := c.torrents[infoHash]
+	c.mu.RUnlock()
+
 	if !ok {
 		slog.Warn("Cannot find any torrent with this hash", "hash", infoHash)
 		return nil
 	}
 
-	hs := handshake.Handshake{
-		InfoHash: infoHash,
-		PeerID:   c.PeerID,
-	}
-
-	err = hs.Write(conn)
-	if err != nil {
-		return err
-	}
-
-	// t.NewPeerConn(c.ctx, conn)
+	t.NewInboundConnection(conn)
 
 	return nil
 }
