@@ -33,7 +33,27 @@ func NewManager(m *metadata.Metadata, peerID [20]byte) *Manager {
 	}
 }
 
-func (m *Manager) OutboundConnection(ctx context.Context, p Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
+func (m *Manager) Run(ctx context.Context, peersChan <-chan []Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
+	go func() {
+		select {
+		case ps := <-peersChan:
+			slog.Info("Connecting to peers")
+			for _, peer := range ps {
+				peerAddr := peer.Addr
+				if peerAddr == "127.0.0.1:6881" {
+					slog.Info("Own address. Skipping...")
+					continue
+				}
+
+				go m.outboundConnection(ctx, peer, workChan, failChan, resultChan)
+			}
+		case <-ctx.Done():
+			slog.Info("Context done")
+		}
+	}()
+}
+
+func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
 	pc := &Connection{
 		Peer:        &p,
 		InfoHash:    m.infoHash,

@@ -59,10 +59,12 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 }
 
 func (t *Torrent) Start(ctx context.Context) error {
+	defer close(t.inboundConnections)
+
 	peersChan := t.trackerManager.Run(ctx, t.Stats.Snapshot)
 	workChan, failChan, resultChan := t.pieceManager.Run(ctx)
+	t.peerManager.Run(ctx, peersChan, workChan, failChan, resultChan)
 
-	defer close(t.inboundConnections)
 	for {
 		select {
 		case c := <-t.inboundConnections:
@@ -72,19 +74,6 @@ func (t *Torrent) Start(ctx context.Context) error {
 					c.Close()
 				}
 			}()
-		case ps := <-peersChan:
-			if !t.SeedingOnly {
-				slog.Info("Connecting to peers")
-				for _, peer := range ps {
-					peerAddr := peer.Addr
-					if peerAddr == "127.0.0.1:6881" {
-						slog.Info("Own address. Skipping...")
-						continue
-					}
-
-					go t.peerManager.OutboundConnection(ctx, peer, workChan, failChan, resultChan)
-				}
-			}
 		case <-ctx.Done():
 			slog.Info("Context done")
 			return nil

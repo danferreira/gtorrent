@@ -51,7 +51,6 @@ func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-c
 			case <-ctx.Done():
 				snap := snapshotFn()
 				_, _, err := m.SendAnnouncement(ctx, EventStopped, snap)
-
 				if err != nil {
 					slog.Error("Error on sending stop event to tracker", "error", err)
 				}
