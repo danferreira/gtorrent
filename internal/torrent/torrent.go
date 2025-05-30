@@ -39,7 +39,10 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 	}
 
 	trackerManager := tracker.NewManager(m, peerID, listenPort)
-	pieceManager := piece.NewManager(m)
+	pieceManager, err := piece.NewManager(m)
+	if err != nil {
+		return nil, err
+	}
 	peerManager := peer.NewManager(m, peerID)
 
 	inboundConnections := make(chan net.Conn)
@@ -63,7 +66,12 @@ func (t *Torrent) Start(ctx context.Context) error {
 	for {
 		select {
 		case c := <-t.inboundConnections:
-			go t.peerManager.InboundConnection(ctx, c, workChan, failChan, resultChan)
+			go func() {
+				err := t.peerManager.InboundConnection(ctx, c, workChan, failChan, resultChan)
+				if err != nil {
+					c.Close()
+				}
+			}()
 		case ps := <-peersChan:
 			if !t.SeedingOnly {
 				slog.Info("Connecting to peers")

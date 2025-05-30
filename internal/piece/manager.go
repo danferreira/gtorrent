@@ -20,7 +20,7 @@ type Manager struct {
 	storage     *storage.Storage
 }
 
-func NewManager(m *metadata.Metadata) *Manager {
+func NewManager(m *metadata.Metadata) (*Manager, error) {
 	pieceHashes := m.Info.Pieces
 	pieceLength := m.Info.PieceLength
 	torrentSize := m.Info.TotalLength()
@@ -35,10 +35,10 @@ func NewManager(m *metadata.Metadata) *Manager {
 		Size:       int64(torrentSize),
 	}
 
-	storage, _ := storage.NewStorage(m.Info.Files)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	storage, err := storage.NewStorage(m.Info.Files)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Manager{
 		pieceHashes: pieceHashes,
@@ -48,7 +48,7 @@ func NewManager(m *metadata.Metadata) *Manager {
 		bitfield: &bitfield,
 		stats:    stats,
 		storage:  storage,
-	}
+	}, nil
 }
 
 func (m *Manager) Run(ctx context.Context) (workChan <-chan *PieceWork, failChan chan<- *PieceWork, resultChan chan *PieceDownloaded) {
