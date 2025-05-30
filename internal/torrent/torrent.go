@@ -61,15 +61,15 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 func (t *Torrent) Start(ctx context.Context) error {
 	defer close(t.inboundConnections)
 
-	peersChan := t.trackerManager.Run(ctx, t.Stats.Snapshot)
-	workChan, failChan, resultChan := t.pieceManager.Run(ctx)
-	t.peerManager.Run(ctx, peersChan, workChan, failChan, resultChan)
+	peerChan := t.trackerManager.Run(ctx, t.Stats.Snapshot)
+	workChan, failChan, downloadedChan := t.pieceManager.Run(ctx)
+	t.peerManager.Run(ctx, peerChan, workChan, failChan, downloadedChan)
 
 	for {
 		select {
 		case c := <-t.inboundConnections:
 			go func() {
-				err := t.peerManager.InboundConnection(ctx, c, workChan, failChan, resultChan)
+				err := t.peerManager.InboundConnection(ctx, c, workChan, failChan, downloadedChan)
 				if err != nil {
 					c.Close()
 				}

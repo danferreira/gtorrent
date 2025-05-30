@@ -6,7 +6,6 @@ import (
 	"net"
 	"sync"
 
-	"github.com/danferreira/gtorrent/internal/handshake"
 	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/danferreira/gtorrent/internal/piece"
 )
@@ -33,27 +32,28 @@ func NewManager(m *metadata.Metadata, peerID [20]byte) *Manager {
 	}
 }
 
-func (m *Manager) Run(ctx context.Context, peersChan <-chan []Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
+func (m *Manager) Run(ctx context.Context, peerChan <-chan Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan<- *piece.PieceDownloaded) {
 	go func() {
-		select {
-		case ps := <-peersChan:
-			slog.Info("Connecting to peers")
-			for _, peer := range ps {
-				peerAddr := peer.Addr
-				if peerAddr == "127.0.0.1:6881" {
+		for {
+			select {
+			case p := <-peerChan:
+				slog.Info("Connecting to peer")
+				// TODO: Fix this hardcoded address in the future
+				if p.Addr == "127.0.0.1:6881" {
 					slog.Info("Own address. Skipping...")
 					continue
 				}
 
-				go m.outboundConnection(ctx, peer, workChan, failChan, resultChan)
+				go m.outboundConnection(ctx, p, workChan, failChan, resultChan)
+
+			case <-ctx.Done():
+				slog.Info("Context done")
 			}
-		case <-ctx.Done():
-			slog.Info("Context done")
 		}
 	}()
 }
 
-func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) {
+func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan<- *piece.PieceDownloaded) {
 	pc := &Connection{
 		Peer:        &p,
 		InfoHash:    m.infoHash,
@@ -76,35 +76,19 @@ func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-cha
 	}
 }
 
-func (m *Manager) InboundConnection(ctx context.Context, conn net.Conn, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) error {
-	hs := handshake.Handshake{
-		InfoHash: m.infoHash,
-		PeerID:   m.peerID,
-	}
-
-	err := hs.Write(conn)
-	if err != nil {
-		return err
-	}
-
-	slog.Info("New peer connection", "peer", conn.RemoteAddr().String())
+func (m *Manager) InboundConnection(ctx context.Context, conn net.Conn, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, downloadedChan chan<- *piece.PieceDownloaded) error {
+	slog.Info("New inbound connection", "addr", conn.RemoteAddr().String())
 	p := Peer{
 		Addr: conn.RemoteAddr().String(),
 	}
 
-	pc := &Connection{
-		Peer:        &p,
-		InfoHash:    m.infoHash,
-		PeerID:      m.peerID,
-		PieceLength: m.pieceLength,
-	}
-
-	err = pc.AcceptConnection(conn)
+	pc := NewConnection(p, m.infoHash, m.peerID, m.pieceLength)
+	err := pc.AcceptConnection(conn)
 	if err != nil {
 		slog.Error("Error when accepting connection", "error", err)
 	}
 
-	err = pc.ExchangeMessages(ctx, workChan, failChan, resultChan)
+	err = pc.ExchangeMessages(ctx, workChan, failChan, downloadedChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 	}

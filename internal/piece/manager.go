@@ -51,14 +51,15 @@ func NewManager(m *metadata.Metadata) (*Manager, error) {
 	}, nil
 }
 
-func (m *Manager) Run(ctx context.Context) (workChan <-chan *PieceWork, failChan chan<- *PieceWork, resultChan chan *PieceDownloaded) {
+func (m *Manager) Run(ctx context.Context) (<-chan *PieceWork, chan<- *PieceWork, chan<- *PieceDownloaded) {
 	work := make(chan *PieceWork, len(m.pieceHashes))
 	fails := make(chan *PieceWork)
-	results := make(chan *PieceDownloaded)
+	downloaded := make(chan *PieceDownloaded)
 
 	go func() {
 		defer close(work)
-		defer close(results)
+		defer close(downloaded)
+		defer close(fails)
 
 		pending := make(map[int]*PieceWork)
 
@@ -112,12 +113,12 @@ func (m *Manager) Run(ctx context.Context) (workChan <-chan *PieceWork, failChan
 					return
 				}
 
-			case pd := <-results:
+			case pd := <-downloaded:
 				slog.Info("Received completed piece", "index", pd.Index)
 				start := pd.Index * m.pieceLength
 				if err := m.storage.Write(start, pd.Data); err != nil {
 					slog.Error("Error writing piece to disk", "error", err)
-					failChan <- &pd.PW
+					fails <- &pd.PW
 					continue
 				}
 
@@ -138,7 +139,7 @@ func (m *Manager) Run(ctx context.Context) (workChan <-chan *PieceWork, failChan
 
 	}()
 
-	return work, fails, results
+	return work, fails, downloaded
 }
 
 func (m *Manager) checkIntegrity(expectedHash [20]byte, data []byte) bool {

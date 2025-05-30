@@ -38,11 +38,24 @@ type Connection struct {
 	Storage            *storage.Storage
 }
 
+func NewConnection(p Peer, infoHash, peerID [20]byte, pieceLength int) *Connection {
+	return &Connection{
+		InfoHash:     infoHash,
+		PeerID:       peerID,
+		PieceLength:  pieceLength,
+		PeerIsChoked: true,
+	}
+
+}
+
 func (pc *Connection) AcceptConnection(conn net.Conn) error {
+	err := pc.sendHandshake(conn)
+	if err != nil {
+		return err
+	}
+
 	pc.Conn = conn
 	slog.Info("Peer connected", "peer", pc.Peer.Addr)
-
-	pc.PeerIsChoked = true
 
 	return pc.sendBitfield()
 }
@@ -73,7 +86,7 @@ func (pc *Connection) Connect() error {
 	return nil
 }
 
-func (pc *Connection) ExchangeMessages(ctx context.Context, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan *piece.PieceDownloaded) error {
+func (pc *Connection) ExchangeMessages(ctx context.Context, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, downloadedChan chan<- *piece.PieceDownloaded) error {
 	requests := 0
 
 	type pendingPiece struct {
@@ -163,7 +176,7 @@ func (pc *Connection) ExchangeMessages(ctx context.Context, workChan <-chan *pie
 						continue
 					}
 
-					resultChan <- &piece.PieceDownloaded{
+					downloadedChan <- &piece.PieceDownloaded{
 						Index: block.index,
 						Data:  r,
 						PW:    *pendingPiece.pw,

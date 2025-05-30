@@ -22,12 +22,12 @@ func NewManager(m *metadata.Metadata, peerID [20]byte, listenPort int) *Manager 
 	}
 }
 
-func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-chan []peer.Peer {
+func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-chan peer.Peer {
 	slog.Info("Starting announce worker")
-	peersChan := make(chan []peer.Peer)
+	peerChan := make(chan peer.Peer, 10)
 
 	go func() {
-		defer close(peersChan)
+		defer close(peerChan)
 
 		currentEvent := EventStarted
 		for {
@@ -41,8 +41,11 @@ func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-c
 				slog.Info("Successfully announced to tracker")
 				currentEvent = EventUpdated
 
-				if len(peers) > 0 {
-					peersChan <- peers
+				for _, p := range peers {
+					select {
+					case peerChan <- p:
+					case <-ctx.Done():
+					}
 				}
 			}
 
@@ -59,7 +62,7 @@ func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-c
 		}
 	}()
 
-	return peersChan
+	return peerChan
 }
 
 func (m *Manager) SendAnnouncement(ctx context.Context, event Event, snap piece.Snapshot) ([]peer.Peer, int, error) {
