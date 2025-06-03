@@ -5,29 +5,30 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/danferreira/gtorrent/internal/peer"
 	"github.com/danferreira/gtorrent/internal/piece"
 )
 
-type Manager struct {
-	tracker *Tracker
+type TrackerAnnouncer interface {
+	Announce(ctx context.Context, e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error)
 }
 
-func NewManager(m *metadata.Metadata, peerID [20]byte, listenPort int) *Manager {
-	t := NewTracker(m, peerID, listenPort)
+type Manager struct {
+	tracker TrackerAnnouncer
+}
 
+func NewManager(tracker TrackerAnnouncer) *Manager {
 	return &Manager{
-		tracker: t,
+		tracker: tracker,
 	}
 }
 
-func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-chan peer.Peer {
+func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-chan []peer.Peer {
 	slog.Info("Starting announce worker")
-	peerChan := make(chan peer.Peer, 10)
+	peersChan := make(chan []peer.Peer)
 
 	go func() {
-		defer close(peerChan)
+		defer close(peersChan)
 
 		currentEvent := EventStarted
 		for {
@@ -41,11 +42,10 @@ func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-c
 				slog.Info("Successfully announced to tracker")
 				currentEvent = EventUpdated
 
-				for _, p := range peers {
-					select {
-					case peerChan <- p:
-					case <-ctx.Done():
-					}
+				select {
+				case peersChan <- peers:
+				case <-ctx.Done():
+					return
 				}
 			}
 
@@ -62,7 +62,7 @@ func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-c
 		}
 	}()
 
-	return peerChan
+	return peersChan
 }
 
 func (m *Manager) SendAnnouncement(ctx context.Context, event Event, snap piece.Snapshot) ([]peer.Peer, int, error) {

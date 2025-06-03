@@ -38,7 +38,7 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 		Size:       int64(torrentSize),
 	}
 
-	trackerManager := tracker.NewManager(m, peerID, listenPort)
+	trackerManager := tracker.NewManager(tracker.NewTracker(m, peerID, listenPort))
 	pieceManager, err := piece.NewManager(m)
 	if err != nil {
 		return nil, err
@@ -58,12 +58,12 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 	}, nil
 }
 
-func (t *Torrent) Start(ctx context.Context) error {
+func (t *Torrent) Start(ctx context.Context) {
 	defer close(t.inboundConnections)
 
-	peerChan := t.trackerManager.Run(ctx, t.Stats.Snapshot)
+	peersChan := t.trackerManager.Run(ctx, t.Stats.Snapshot)
 	workChan, failChan, downloadedChan := t.pieceManager.Run(ctx)
-	t.peerManager.Run(ctx, peerChan, workChan, failChan, downloadedChan)
+	t.peerManager.Run(ctx, peersChan, workChan, failChan, downloadedChan)
 
 	for {
 		select {
@@ -76,7 +76,7 @@ func (t *Torrent) Start(ctx context.Context) error {
 			}()
 		case <-ctx.Done():
 			slog.Info("Context done")
-			return nil
+			return
 		}
 	}
 }
