@@ -23,46 +23,35 @@ func NewManager(tracker TrackerAnnouncer) *Manager {
 	}
 }
 
-func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot) <-chan []peer.Peer {
+func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot, pool *peer.Pool) {
 	slog.Info("Starting announce worker")
-	peersChan := make(chan []peer.Peer)
 
-	go func() {
-		defer close(peersChan)
+	currentEvent := EventStarted
 
-		currentEvent := EventStarted
-		for {
-			snap := snapshotFn()
-			peers, interval, err := m.SendAnnouncement(ctx, currentEvent, snap)
+	for {
+		snap := snapshotFn()
+		peers, interval, err := m.SendAnnouncement(ctx, currentEvent, snap)
 
-			if err != nil {
-				slog.Error("Error on tracker announce. Retrying in 10 seconds...", "error", err)
-				interval = 10
-			} else {
-				slog.Info("Successfully announced to tracker")
-				currentEvent = EventUpdated
-
-				select {
-				case peersChan <- peers:
-				case <-ctx.Done():
-					return
-				}
-			}
-
-			select {
-			case <-time.After(time.Duration(interval) * time.Second):
-			case <-ctx.Done():
-				snap := snapshotFn()
-				_, _, err := m.SendAnnouncement(ctx, EventStopped, snap)
-				if err != nil {
-					slog.Error("Error on sending stop event to tracker", "error", err)
-				}
-				return
-			}
+		if err != nil {
+			slog.Error("Error on tracker announce. Retrying in 10 seconds...", "error", err)
+			interval = 10
+		} else {
+			slog.Info("Successfully announced to tracker")
+			pool.PushMany(peers)
+			currentEvent = EventUpdated
 		}
-	}()
 
-	return peersChan
+		select {
+		case <-time.After(time.Duration(interval) * time.Second):
+		case <-ctx.Done():
+			snap := snapshotFn()
+			_, _, err := m.SendAnnouncement(ctx, EventStopped, snap)
+			if err != nil {
+				slog.Error("Error on sending stop event to tracker", "error", err)
+			}
+			return
+		}
+	}
 }
 
 func (m *Manager) SendAnnouncement(ctx context.Context, event Event, snap piece.Snapshot) ([]peer.Peer, int, error) {

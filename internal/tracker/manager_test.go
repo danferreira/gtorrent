@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,17 +15,27 @@ import (
 )
 
 type MockTrackerService struct {
-	peersToReturn []peer.Peer
-	interval      int
-	err           error
-	announceCalls int
-	lastEvent     Event
+	peers    []peer.Peer
+	interval int
+	err      error
+
+	mu        sync.Mutex
+	calls     int
+	lastEvent Event
 }
 
-func (mt *MockTrackerService) Announce(ctx context.Context, e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
-	mt.announceCalls++
-	mt.lastEvent = e
-	return mt.peersToReturn, mt.interval, mt.err
+func (m *MockTrackerService) Announce(ctx context.Context, e Event, downloaded, uploaded, left int64) ([]peer.Peer, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	m.lastEvent = e
+	return m.peers, m.interval, m.err
+}
+
+func (m *MockTrackerService) stats() (calls int, last Event) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls, m.lastEvent
 }
 
 func TestMain(m *testing.M) {
@@ -36,39 +47,40 @@ func TestMain(m *testing.M) {
 }
 
 func TestRun(t *testing.T) {
-	mockTracker := &MockTrackerService{
-		peersToReturn: []peer.Peer{
+	mt := &MockTrackerService{
+		peers: []peer.Peer{
 			{Addr: "1.1.1.1:1234"},
 			{Addr: "2.2.2.2:5678"},
 		},
 		interval: 1,
 	}
 
-	m := NewManager(mockTracker)
-
 	snapshotFn := func() piece.Snapshot {
-		return piece.Snapshot{Downloaded: 0, Uploaded: 0, Left: 100}
+		return piece.Snapshot{Left: 100}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 
-	peersChan := m.Run(ctx, snapshotFn)
+	pool := peer.NewPool(10)
 
-	peers := <-peersChan
+	m := NewManager(mt)
+	go m.Run(ctx, snapshotFn, pool)
 
-	assert.Equal(t, 1, mockTracker.announceCalls)
-	assert.True(t, len(peers) > 0)
-	assert.Equal(t, mockTracker.peersToReturn, peers)
-	assert.Equal(t, EventStarted, mockTracker.lastEvent)
+	// --- first announce (started) must happen quickly ---------------
+	assert.Eventually(t, func() bool {
+		calls, ev := mt.stats()
+		return calls == 1 && ev == EventStarted && pool.Len() == 2
+	}, 200*time.Millisecond, 10*time.Millisecond)
 
-	peers = <-peersChan
-	assert.Equal(t, 2, mockTracker.announceCalls)
-	assert.Equal(t, EventUpdated, mockTracker.lastEvent)
+	// --- second announce (updated) after ~1 s -----------------------
+	assert.Eventually(t, func() bool {
+		calls, ev := mt.stats()
+		return calls >= 2 && ev == EventUpdated
+	}, 1250*time.Millisecond, 20*time.Millisecond)
 
-	peers = <-peersChan
-	assert.Equal(t, 3, mockTracker.announceCalls)
-	assert.Equal(t, EventStopped, mockTracker.lastEvent)
-
-	_, ok := <-peersChan
-	assert.False(t, ok, "expected peersChan to be closed after context timeout")
+	// --- context cancel triggers stopped announce -------------------
+	assert.Eventually(t, func() bool {
+		_, ev := mt.stats()
+		return ev == EventStopped
+	}, 500*time.Millisecond, 10*time.Millisecond)
 }

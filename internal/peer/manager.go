@@ -5,10 +5,13 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/danferreira/gtorrent/internal/piece"
 )
+
+const MaxPeers = 50
 
 type Manager struct {
 	mu             sync.Mutex
@@ -32,44 +35,40 @@ func NewManager(m *metadata.Metadata, peerID [20]byte) *Manager {
 	}
 }
 
-func (m *Manager) Run(ctx context.Context, peerChan <-chan Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan<- *piece.PieceDownloaded) {
-	go func() {
-		for {
-			select {
-			case p := <-peerChan:
-				slog.Info("Connecting to peer")
-				// TODO: Fix this hardcoded address in the future
-				if p.Addr == "127.0.0.1:6881" {
-					slog.Info("Own address. Skipping...")
-					continue
+func (m *Manager) Run(ctx context.Context, pool *Pool, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan<- *piece.PieceDownloaded) {
+	ticker := time.NewTicker(5 * time.Second) // housekeeping
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// fill up to MaxPeers
+			for len(m.connectedPeers) < MaxPeers {
+				peer, ok := pool.Pop()
+				if !ok {
+					slog.Info("pool is empty")
+				} else {
+					go m.outboundConnection(ctx, peer, workChan, failChan, resultChan)
 				}
-
-				go m.outboundConnection(ctx, p, workChan, failChan, resultChan)
-
-			case <-ctx.Done():
-				slog.Info("Context done")
 			}
 		}
-	}()
+	}
 }
 
 func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan<- *piece.PieceDownloaded) {
-	pc := &Connection{
-		Peer:        &p,
-		InfoHash:    m.infoHash,
-		PeerID:      m.peerID,
-		PieceLength: m.pieceLength,
-	}
+	pc := NewConnection(&p, m.pieceLength)
 
-	if err := pc.Connect(); err != nil {
+	if err := pc.outboundConnection(m.infoHash, m.peerID); err != nil {
 		slog.Error("Error during connection", "error", err)
-		slog.Info("Removing from list of connected peers", "peer", p.Addr)
 		return
 	}
 
+	if err := pc.sendBitfield(); err != nil {
+		slog.Warn("Error sending bitfield", "error", err)
+	}
 	m.addConnectedPeer(pc)
 
-	err := pc.ExchangeMessages(ctx, workChan, failChan, resultChan)
+	err := pc.exchangeMessages(ctx, workChan, failChan, resultChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 		m.removeConnectedPeer(&p)
@@ -78,17 +77,17 @@ func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-cha
 
 func (m *Manager) InboundConnection(ctx context.Context, conn net.Conn, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, downloadedChan chan<- *piece.PieceDownloaded) error {
 	slog.Info("New inbound connection", "addr", conn.RemoteAddr().String())
-	p := Peer{
+	p := &Peer{
 		Addr: conn.RemoteAddr().String(),
 	}
 
-	pc := NewConnection(p, m.infoHash, m.peerID, m.pieceLength)
-	err := pc.AcceptConnection(conn)
+	pc := NewConnection(p, m.pieceLength)
+	err := pc.inboundConnection(conn, m.infoHash, m.peerID)
 	if err != nil {
 		slog.Error("Error when accepting connection", "error", err)
 	}
 
-	err = pc.ExchangeMessages(ctx, workChan, failChan, downloadedChan)
+	err = pc.exchangeMessages(ctx, workChan, failChan, downloadedChan)
 	if err != nil {
 		slog.Error("Error when exchanging messages with peer", "error", err)
 	}
@@ -99,7 +98,7 @@ func (m *Manager) InboundConnection(ctx context.Context, conn net.Conn, workChan
 func (m *Manager) addConnectedPeer(pc *Connection) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.connectedPeers[pc.Peer.Addr] = pc
+	m.connectedPeers[pc.peer.Addr] = pc
 }
 
 func (m *Manager) removeConnectedPeer(peer *Peer) {
