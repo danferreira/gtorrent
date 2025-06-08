@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/danferreira/gtorrent/internal/peer"
-	"github.com/danferreira/gtorrent/internal/piece"
 )
 
 type TrackerAnnouncer interface {
@@ -23,14 +22,15 @@ func NewManager(tracker TrackerAnnouncer) *Manager {
 	}
 }
 
-func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot, pool *peer.Pool) {
+type Snapshot func() (int64, int64, int64)
+
+func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot, pool *peer.Pool) {
 	slog.Info("Starting announce worker")
 
 	currentEvent := EventStarted
 
 	for {
-		snap := snapshotFn()
-		peers, interval, err := m.SendAnnouncement(ctx, currentEvent, snap)
+		peers, interval, err := m.SendAnnouncement(ctx, currentEvent, snapshotFn)
 
 		if err != nil {
 			slog.Error("Error on tracker announce. Retrying in 10 seconds...", "error", err)
@@ -44,8 +44,7 @@ func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot, poo
 		select {
 		case <-time.After(time.Duration(interval) * time.Second):
 		case <-ctx.Done():
-			snap := snapshotFn()
-			_, _, err := m.SendAnnouncement(ctx, EventStopped, snap)
+			_, _, err := m.SendAnnouncement(ctx, EventStopped, snapshotFn)
 			if err != nil {
 				slog.Error("Error on sending stop event to tracker", "error", err)
 			}
@@ -54,9 +53,10 @@ func (m *Manager) Run(ctx context.Context, snapshotFn func() piece.Snapshot, poo
 	}
 }
 
-func (m *Manager) SendAnnouncement(ctx context.Context, event Event, snap piece.Snapshot) ([]peer.Peer, int, error) {
+func (m *Manager) SendAnnouncement(ctx context.Context, event Event, snapshotFn Snapshot) ([]peer.Peer, int, error) {
 	slog.Info("Sending announcement to tracker", "event", event)
-	receivedPeers, interval, err := m.tracker.Announce(ctx, event, snap.Downloaded, snap.Uploaded, snap.Left)
+	downloaded, uploaded, left := snapshotFn()
+	receivedPeers, interval, err := m.tracker.Announce(ctx, event, downloaded, uploaded, left)
 	if err != nil {
 		return nil, 0, err
 	}
