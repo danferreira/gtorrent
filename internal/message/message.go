@@ -11,15 +11,15 @@ import (
 type MessageID uint8
 
 const (
-	MessageChoke       MessageID = 0
-	MessageUnchoke     MessageID = 1
-	MessageInterested  MessageID = 2
-	MessageNotInterest MessageID = 3
-	MessageHave        MessageID = 4
-	MessageBitfield    MessageID = 5
-	MessageRequest     MessageID = 6
-	MessagePiece       MessageID = 7
-	MessageCancel      MessageID = 8
+	MessageChoke         MessageID = 0
+	MessageUnchoke       MessageID = 1
+	MessageInterested    MessageID = 2
+	MessageNotInterested MessageID = 3
+	MessageHave          MessageID = 4
+	MessageBitfield      MessageID = 5
+	MessageRequest       MessageID = 6
+	MessagePiece         MessageID = 7
+	MessageCancel        MessageID = 8
 )
 
 type Message struct {

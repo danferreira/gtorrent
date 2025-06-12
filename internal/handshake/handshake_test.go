@@ -28,7 +28,7 @@ func TestRead(t *testing.T) {
 		output     *Handshake
 		shouldFail bool
 	}{
-		"mal constructed buffer":      {[]byte{0}, nil, true},
+		"bad constructed buffer":      {[]byte{0}, nil, true},
 		"invalid protocol length":     {[]byte{18}, nil, true},
 		"invalid protocol identifier": {append([]byte{19}, []byte("Some Other protocol")...), nil, true},
 		"valid handshake": {slices.Concat([]byte{19}, []byte("BitTorrent protocol"), []byte{0, 0, 0, 0, 0, 0, 0, 0}, infoHash[:], peerID[:]), &Handshake{
