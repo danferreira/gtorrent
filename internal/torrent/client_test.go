@@ -2,9 +2,6 @@ package torrent
 
 import (
 	"context"
-	"io"
-	"log/slog"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,11 +16,10 @@ type MockTorrentRunner struct {
 	StartFunc func(ctx context.Context) error
 }
 
-func (m MockTorrentRunner) Start(ctx context.Context) error {
+func (m MockTorrentRunner) Start(ctx context.Context) {
 	if m.StartFunc != nil {
-		return m.StartFunc(ctx)
+		m.StartFunc(ctx)
 	}
-	return nil
 }
 
 type MockTorrentFactory struct {
@@ -37,14 +33,6 @@ func (m MockTorrentFactory) NewTorrent(meta *metadata.Metadata, peerID [20]byte,
 	return MockTorrentRunner{}, nil
 }
 
-func TestMain(m *testing.M) {
-	slog.SetDefault(slog.New(
-		slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}),
-	))
-
-	os.Exit(m.Run())
-}
-
 func TestGeneratePeerID(t *testing.T) {
 	peerID := generatePeerID()
 
@@ -55,20 +43,26 @@ func TestGeneratePeerID(t *testing.T) {
 func TestAddFile(t *testing.T) {
 	mockFactory := MockTorrentFactory{}
 
-	client := NewClientWithDeps(mockFactory, 6881)
+	client := NewClientWithDeps(mockFactory, Config{ListenPort: 6881})
 
-	err := client.AddFile("invalid.torrent")
+	_, err := client.AddFile("testdata/file.torrent")
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(client.torrents))
+
+	_, err = client.AddFile("testdata/file.torrent")
+	assert.EqualError(t, err, "torrent already added: testdata/file.torrent")
+	assert.Equal(t, 1, len(client.torrents))
+}
+
+func TestAddFileNonExistingFile(t *testing.T) {
+	mockFactory := MockTorrentFactory{}
+
+	client := NewClientWithDeps(mockFactory, Config{ListenPort: 6881})
+
+	_, err := client.AddFile("invalid.torrent")
 
 	expectedError := "failed to parse torrent file invalid.torrent: open invalid.torrent: no such file or directory"
 	require.EqualError(t, err, expectedError)
-
-	err = client.AddFile("testdata/file.torrent")
-	assert.Nil(t, err)
-	assert.Equal(t, 1, len(client.torrents))
-
-	err = client.AddFile("testdata/file.torrent")
-	assert.EqualError(t, err, "torrent already added: testdata/file.torrent")
-	assert.Equal(t, 1, len(client.torrents))
 }
 
 func TestStartTorrent(t *testing.T) {
@@ -86,16 +80,14 @@ func TestStartTorrent(t *testing.T) {
 			return mockTorrent, nil
 		},
 	}
-	client := NewClientWithDeps(mockFactory, 6881)
+	client := NewClientWithDeps(mockFactory, Config{ListenPort: 6881})
 
-	err := client.AddFile("testdata/file.torrent")
-	assert.Nil(t, err)
+	infoHash, err := client.AddFile("testdata/file.torrent")
+	assert.NoError(t, err)
+	assert.Equal(t, mockTorrent.Metadata.Info.InfoHash, infoHash)
 
-	unknownHash := [20]byte{}
-	err = client.StartTorrent(unknownHash)
-	require.EqualError(t, err, "torrent not found")
-
-	client.StartTorrent(mockTorrent.Metadata.InfoHash())
+	err = client.StartTorrent(infoHash)
+	assert.NoError(t, err)
 
 	select {
 	case <-startCalled:
@@ -103,4 +95,30 @@ func TestStartTorrent(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Start method was not called on torrent")
 	}
+}
+
+func TestStartTorrentUnknownHash(t *testing.T) {
+	startCalled := make(chan bool, 1)
+
+	mockTorrent := MockTorrentRunner{
+		StartFunc: func(ctx context.Context) error {
+			startCalled <- true
+			return nil
+		},
+	}
+	mockFactory := MockTorrentFactory{
+		NewTorrentFunc: func(m *metadata.Metadata, peerID [20]byte, listenPort int) (TorrentRunner, error) {
+			mockTorrent.Metadata = *m
+			return mockTorrent, nil
+		},
+	}
+	client := NewClientWithDeps(mockFactory, Config{ListenPort: 6881})
+
+	infoHash, err := client.AddFile("testdata/file.torrent")
+	assert.NoError(t, err)
+	assert.Equal(t, mockTorrent.Metadata.Info.InfoHash, infoHash)
+
+	unknownHash := [20]byte{}
+	err = client.StartTorrent(unknownHash)
+	require.EqualError(t, err, "torrent not found")
 }

@@ -12,7 +12,6 @@ import (
 
 	"github.com/danferreira/gtorrent/internal/handshake"
 	"github.com/danferreira/gtorrent/internal/metadata"
-	"github.com/danferreira/gtorrent/internal/piece"
 )
 
 type TorrentFactory interface {
@@ -20,7 +19,7 @@ type TorrentFactory interface {
 }
 
 type TorrentRunner interface {
-	Start(ctx context.Context) error
+	Start(ctx context.Context)
 }
 
 type DefaultTorrentFactory struct{}
@@ -29,54 +28,52 @@ func (d DefaultTorrentFactory) NewTorrent(m *metadata.Metadata, peerID [20]byte,
 	return NewTorrent(m, peerID, listenPort)
 }
 
+type Config struct {
+	ListenPort int
+}
+
 type Client struct {
 	mu sync.RWMutex
+
+	config Config
 
 	peerID [20]byte
 
 	torrentFactory TorrentFactory
 	torrents       map[[20]byte]TorrentRunner
 
-	statsIn  chan piece.TorrentStats
-	statsOut chan piece.TorrentStats
-
 	ctx    context.Context
 	cancel context.CancelFunc
-
-	listenPort int
 }
 
 var (
 	NewTorrentFactory = NewTorrent
 )
 
-func NewClient(listenPort int) *Client {
-	return NewClientWithDeps(DefaultTorrentFactory{}, listenPort)
+func NewClient(config Config) *Client {
+	return NewClientWithDeps(DefaultTorrentFactory{}, config)
 }
 
-func NewClientWithDeps(factory TorrentFactory, listenPort int) *Client {
-	in := make(chan piece.TorrentStats, 64)
-	out := make(chan piece.TorrentStats, 64)
+func NewClientWithDeps(factory TorrentFactory, config Config) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &Client{
+		config:         config,
 		torrentFactory: factory,
 		torrents:       make(map[[20]byte]TorrentRunner),
 		peerID:         generatePeerID(),
-		statsIn:        in,
-		statsOut:       out,
 		ctx:            ctx,
 		cancel:         cancel,
-		listenPort:     listenPort,
 	}
 
 	return e
 }
 
-func (c *Client) AddFile(path string) error {
+func (c *Client) AddFile(path string) ([20]byte, error) {
+	slog.Info("adding new file", "path", path)
 	m, err := metadata.Parse(path)
 	if err != nil {
-		return fmt.Errorf("failed to parse torrent file %s: %w", path, err)
+		return [20]byte{}, fmt.Errorf("failed to parse torrent file %s: %w", path, err)
 	}
 
 	infoHash := m.Info.InfoHash
@@ -84,20 +81,21 @@ func (c *Client) AddFile(path string) error {
 	defer c.mu.Unlock()
 
 	if _, ok := c.torrents[infoHash]; ok {
-		return fmt.Errorf("torrent already added: %s", path)
+		return infoHash, fmt.Errorf("torrent already added: %s", path)
 	}
 
-	t, err := c.torrentFactory.NewTorrent(m, c.peerID, c.listenPort)
+	t, err := c.torrentFactory.NewTorrent(m, c.peerID, c.config.ListenPort)
 	if err != nil {
-		return fmt.Errorf("failed to create torrent: %w", err)
+		return infoHash, fmt.Errorf("failed to create torrent: %w", err)
 	}
 
 	c.torrents[infoHash] = t
 
-	return nil
+	return infoHash, nil
 }
 
 func (c *Client) StartTorrent(infoHash [20]byte) error {
+	slog.Info("starting torrent")
 	c.mu.RLock()
 	entry, exists := c.torrents[infoHash]
 	c.mu.RUnlock()
@@ -113,20 +111,16 @@ func (c *Client) StartTorrent(infoHash [20]byte) error {
 			c.mu.Unlock()
 		}()
 
-		if err := entry.Start(c.ctx); err != nil {
-			slog.Error("torrent stopped with error", "infoHash", infoHash, "err", err)
-		} else {
-			slog.Info("torrent finished")
-		}
+		entry.Start(c.ctx)
 	}()
 
 	return nil
 }
 
 func (c *Client) ListenForInboundPeers() error {
-	slog.Info("Listening for incoming peers", "port", c.listenPort)
+	slog.Info("listening for incoming peers", "port", c.config.ListenPort)
 
-	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", c.listenPort))
+	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", c.config.ListenPort))
 	if err != nil {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
@@ -162,7 +156,6 @@ func (c *Client) ListenForInboundPeers() error {
 func (c *Client) Close() {
 	c.cancel()
 }
-func (c *Client) Stats() <-chan piece.TorrentStats { return c.statsOut }
 
 func (c *Client) handleInboundConnection(conn net.Conn) error {
 	h, err := handshake.Read(conn)

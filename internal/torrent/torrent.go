@@ -2,116 +2,86 @@ package torrent
 
 import (
 	"context"
-	"log/slog"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/danferreira/gtorrent/internal/peer"
 	"github.com/danferreira/gtorrent/internal/piece"
+	"github.com/danferreira/gtorrent/internal/state"
+	"github.com/danferreira/gtorrent/internal/storage"
 	"github.com/danferreira/gtorrent/internal/tracker"
 )
 
+type StorageService interface {
+	Read(start int, length int) ([]byte, error)
+}
+
 type Torrent struct {
-	mu          sync.Mutex
-	Metadata    metadata.Metadata
-	Stats       *piece.TorrentStats
-	PeerID      [20]byte
-	SeedingOnly bool
+	mu sync.Mutex
+
+	metadata *metadata.Metadata
+	PeerID   [20]byte
 
 	inboundConnections chan net.Conn
 
 	trackerManager *tracker.Manager
-	pieceManager   *piece.Manager
+	pieceScheduler *piece.Scheduler
 	peerManager    *peer.Manager
+	pieceCompleter *piece.Completer
+
+	state *state.State
+
+	storage StorageService
 
 	listenPort int
 }
 
 func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent, error) {
-	torrentSize := m.Info.TotalLength()
-	stats := &piece.TorrentStats{
-		Downloaded: 0,
-		Uploaded:   0,
-		Left:       int64(torrentSize),
-		Size:       int64(torrentSize),
-	}
+	pool := peer.NewPool(10)
+	trackerManager := tracker.NewManager(tracker.NewTracker(m, peerID, listenPort), pool)
 
-	trackerManager := tracker.NewManager(tracker.NewTracker(m, peerID, listenPort))
-	pieceManager, err := piece.NewManager(m)
+	str, err := storage.NewStorage(m.Info.Files)
 	if err != nil {
 		return nil, err
 	}
-	peerManager := peer.NewManager(m, peerID)
+
+	state := state.NewState(m, str)
+
+	peerManager := peer.NewManager(m, state, peerID, pool, str)
+
+	pieceScheduler, err := piece.NewScheduler(m, state.GetBitfield())
+	if err != nil {
+		return nil, err
+	}
+
+	pieceCompleter := piece.NewCompleter(m, str)
 
 	inboundConnections := make(chan net.Conn)
 
 	return &Torrent{
-		Metadata:           *m,
+		metadata:           m,
 		PeerID:             peerID,
-		Stats:              stats,
 		trackerManager:     trackerManager,
-		pieceManager:       pieceManager,
+		pieceScheduler:     pieceScheduler,
 		peerManager:        peerManager,
+		pieceCompleter:     pieceCompleter,
 		inboundConnections: inboundConnections,
+		state:              state,
 	}, nil
 }
 
 func (t *Torrent) Start(ctx context.Context) {
 	defer close(t.inboundConnections)
 
-	pool := peer.NewPool(10)
+	go t.trackerManager.Run(ctx, t.state.Snapshot)
+	workChan, failChan := t.pieceScheduler.Run(ctx)
+	resultChan := t.peerManager.Run(ctx, workChan, failChan, t.inboundConnections)
+	go t.pieceCompleter.Run(ctx, failChan, resultChan)
 
-	go t.trackerManager.Run(ctx, t.Stats.Snapshot, pool)
-	workChan, failChan, downloadedChan := t.pieceManager.Run(ctx)
-	go t.peerManager.Run(ctx, pool, workChan, failChan, downloadedChan)
-
-	for {
-		select {
-		case c := <-t.inboundConnections:
-			go func() {
-				err := t.peerManager.InboundConnection(ctx, c, workChan, failChan, downloadedChan)
-				if err != nil {
-					c.Close()
-				}
-			}()
-		case <-ctx.Done():
-			slog.Info("Context done")
-			return
-		}
-	}
+	<-ctx.Done()
 }
 
 func (t *Torrent) NewInboundConnection(conn net.Conn) {
 	t.inboundConnections <- conn
 }
-
-func (t *Torrent) StatsChan() <-chan piece.TorrentStats {
-	statsChann := make(chan piece.TorrentStats)
-
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				statsChann <- *t.Stats
-			}
-		}
-
-	}()
-
-	return statsChann
-}
-
-// func (t *Torrent) broadcastHavePiece(index int) {
-// 	t.mu.Lock()
-// 	defer t.mu.Unlock()
-// 	for _, pc := range t.connectedPeers {
-// 		if err := pc.SendHave(index); err != nil {
-// 			slog.Error("Error sending Have message to peer", "error", err)
-// 		}
-// 	}
-// }
