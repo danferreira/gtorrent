@@ -1,9 +1,9 @@
 package storage
 
 import (
-	"bytes"
+	"errors"
 	"fmt"
-	"log/slog"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -13,7 +13,7 @@ import (
 type File struct {
 	File   *os.File
 	Path   string
-	Length int
+	Length int64
 }
 type Storage struct {
 	Files []File
@@ -44,11 +44,15 @@ func NewStorage(files []metadata.FileInfo) (*Storage, error) {
 	}, nil
 }
 
-func (s *Storage) Read(start int, length int) ([]byte, error) {
-	var offset int
-	end := start + length
-	buffer := new(bytes.Buffer)
-	remaining := length
+func (s *Storage) ReadAt(buf []byte, start int64) (int, error) {
+	if len(buf) == 0 {
+		return 0, nil
+	}
+
+	var offset int64
+	var n int
+	remaining := int64(len(buf))
+	end := start + int64(len(buf))
 
 	for _, file := range s.Files {
 		nextOffset := offset + file.Length
@@ -62,45 +66,33 @@ func (s *Storage) Read(start int, length int) ([]byte, error) {
 			actualStart = 0
 		}
 
-		st, err := file.File.Stat()
-		if err != nil {
-			return nil, err
-		}
-
-		if st.Size() <= int64(actualStart) {
-			continue
-		}
-
 		actualEnd := file.Length
 		if end <= nextOffset {
 			actualEnd = end - offset
 		}
 
-		offsetLength := actualEnd - actualStart
-
-		chunk := make([]byte, offsetLength)
-
-		_, err = file.File.ReadAt(chunk, int64(actualStart))
-
-		if err != nil {
-			slog.Error("An error occurred", "error", err)
-			return nil, err
+		amount := actualEnd - actualStart
+		m, err := file.File.ReadAt(buf[n:n+int(amount)], actualStart)
+		n += m
+		if err != nil && !errors.Is(err, io.EOF) {
+			return n, err
 		}
-		buffer.Write(chunk)
 
-		remaining -= offsetLength
+		remaining -= int64(m)
+
 		if remaining == 0 {
-			break
+			return n, nil
 		}
 
 		offset += file.Length
 	}
 
-	return buffer.Bytes(), nil
+	return n, io.EOF
 }
 
-func (s *Storage) Write(start int, data []byte) error {
-	var offset, cursor int
+func (s *Storage) WriteAt(data []byte, start int64) (int, error) {
+	var offset, cursor int64
+	var n int
 
 	for _, file := range s.Files {
 		nextOffset := offset + file.Length
@@ -115,29 +107,29 @@ func (s *Storage) Write(start int, data []byte) error {
 		}
 
 		var actualData []byte
-		if (actualStart + len(data[cursor:])) > file.Length {
+		if (actualStart + int64(len(data[cursor:]))) > file.Length {
 			amount := file.Length - actualStart
-			actualData = data[cursor:amount]
+			actualData = data[cursor : cursor+amount]
 		} else {
 			actualData = data[cursor:]
 		}
 
-		cursor = cursor + len(actualData)
-
-		_, err := file.File.WriteAt(actualData, int64(actualStart))
-
+		m, err := file.File.WriteAt(actualData, int64(actualStart))
 		if err != nil {
-			return err
+			return n, err
 		}
 
-		if cursor == len(data) {
+		n += m
+
+		cursor += int64(len(actualData))
+		if cursor == int64(len(data)) {
 			break
 		}
 
 		offset += file.Length
 	}
 
-	return nil
+	return n, nil
 }
 
 func (s *Storage) CloseFiles() error {

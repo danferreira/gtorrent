@@ -7,6 +7,7 @@ import (
 
 	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewStorage(t *testing.T) {
@@ -29,7 +30,7 @@ func TestNewStorage(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-func TestRead(t *testing.T) {
+func TestReadAt(t *testing.T) {
 	tmp := t.TempDir()
 	fo1, _ := os.Create(filepath.Join(tmp, "read_1.txt"))
 	fo1.Write([]byte("abcde"))
@@ -45,7 +46,7 @@ func TestRead(t *testing.T) {
 	}}
 
 	tests := map[string]struct {
-		start    int
+		start    int64
 		len      int
 		expected string
 	}{
@@ -54,18 +55,20 @@ func TestRead(t *testing.T) {
 		"partially read from both files": {3, 5, "defgh"},
 	}
 	storage, err := NewStorage(files)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	defer storage.CloseFiles()
 
 	for _, tt := range tests {
-		v, err := storage.Read(tt.start, tt.len)
-		assert.Nil(t, err)
-		assert.Equal(t, []byte(tt.expected), v)
+		buf := make([]byte, tt.len)
+		v, err := storage.ReadAt(buf, tt.start)
+		assert.NoError(t, err)
+		assert.Equal(t, tt.len, v)
+		assert.Equal(t, []byte(tt.expected), buf)
 	}
 }
 
-func TestWrite(t *testing.T) {
+func TestWriteAt(t *testing.T) {
 	tmp := t.TempDir()
 
 	files := []metadata.FileInfo{{
@@ -80,25 +83,21 @@ func TestWrite(t *testing.T) {
 	}}
 
 	storage, err := NewStorage(files)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	defer storage.CloseFiles()
 
-	storage.Write(0, []byte("abcde"))
-	storage.Write(5, []byte("fghij"))
-	storage.Write(10, []byte("klmno"))
-	storage.Write(3, []byte("xxxxx"))
-	storage.Write(8, []byte("zzzzz"))
+	storage.WriteAt([]byte("cdefghijklmn"), 2)
 
 	buf := make([]byte, 5)
 	storage.Files[0].File.ReadAt(buf, 0)
-	assert.Equal(t, []byte("abcxx"), buf)
+	assert.Equal(t, []byte("\x00\x00cde"), buf)
 
 	buf = make([]byte, 5)
 	storage.Files[1].File.ReadAt(buf, 0)
-	assert.Equal(t, []byte("xxxzz"), buf)
+	assert.Equal(t, []byte("fghij"), buf)
 
 	buf = make([]byte, 5)
 	storage.Files[2].File.ReadAt(buf, 0)
-	assert.Equal(t, []byte("zzzno"), buf)
+	assert.Equal(t, []byte("klmn\x00"), buf)
 }
