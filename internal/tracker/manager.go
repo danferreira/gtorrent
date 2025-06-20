@@ -14,18 +14,20 @@ type TrackerAnnouncer interface {
 
 type Manager struct {
 	tracker TrackerAnnouncer
+	pool    *peer.Pool
 }
 
-func NewManager(tracker TrackerAnnouncer) *Manager {
+func NewManager(tracker TrackerAnnouncer, pool *peer.Pool) *Manager {
 	return &Manager{
 		tracker: tracker,
+		pool:    pool,
 	}
 }
 
 type Snapshot func() (int64, int64, int64)
 
-func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot, pool *peer.Pool) {
-	slog.Info("Starting announce worker")
+func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot) {
+	slog.Info("starting announce worker")
 
 	currentEvent := EventStarted
 
@@ -33,11 +35,11 @@ func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot, pool *peer.Pool)
 		peers, interval, err := m.SendAnnouncement(ctx, currentEvent, snapshotFn)
 
 		if err != nil {
-			slog.Error("Error on tracker announce. Retrying in 10 seconds...", "error", err)
+			slog.Error("error on tracker announce. Retrying in 10 seconds...", "error", err)
 			interval = 10
 		} else {
-			slog.Info("Successfully announced to tracker")
-			pool.PushMany(peers)
+			slog.Info("successfully announced to tracker")
+			m.pool.PushMany(peers)
 			currentEvent = EventUpdated
 		}
 
@@ -46,7 +48,7 @@ func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot, pool *peer.Pool)
 		case <-ctx.Done():
 			_, _, err := m.SendAnnouncement(ctx, EventStopped, snapshotFn)
 			if err != nil {
-				slog.Error("Error on sending stop event to tracker", "error", err)
+				slog.Error("error on sending stop event to tracker", "error", err)
 			}
 			return
 		}
@@ -54,7 +56,7 @@ func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot, pool *peer.Pool)
 }
 
 func (m *Manager) SendAnnouncement(ctx context.Context, event Event, snapshotFn Snapshot) ([]peer.Peer, int, error) {
-	slog.Info("Sending announcement to tracker", "event", event)
+	slog.Info("sending announcement to tracker", "event", event)
 	downloaded, uploaded, left := snapshotFn()
 	receivedPeers, interval, err := m.tracker.Announce(ctx, event, downloaded, uploaded, left)
 	if err != nil {

@@ -62,8 +62,8 @@ func TestRun(t *testing.T) {
 
 	pool := peer.NewPool(10)
 
-	m := NewManager(mt)
-	go m.Run(ctx, snapshotFn, pool)
+	m := NewManager(mt, pool)
+	go m.Run(ctx, snapshotFn)
 
 	// --- first announce (started) must happen quickly ---------------
 	assert.Eventually(t, func() bool {
