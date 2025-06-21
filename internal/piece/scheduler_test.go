@@ -14,7 +14,7 @@ func NewMockedScheduler() (*Scheduler, error) {
 	m := &metadata.Metadata{
 		Info: metadata.Info{
 			PieceLength: 262144,
-			Pieces:      []metadata.PieceHash{{0}, {0}, {0}, {0}},
+			Pieces:      [][20]byte{{0}, {0}, {0}, {0}},
 			Files: []metadata.FileInfo{
 				{Length: 1048576, Path: "file1.txt"},
 			},
@@ -25,7 +25,7 @@ func NewMockedScheduler() (*Scheduler, error) {
 	bitfield.SetPiece(0)
 	bitfield.SetPiece(1)
 
-	return NewScheduler(m, &bitfield)
+	return NewScheduler(m, bitfield)
 }
 
 func TestNewScheduler(t *testing.T) {

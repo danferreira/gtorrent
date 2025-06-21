@@ -10,12 +10,12 @@ import (
 
 type Scheduler struct {
 	mu       sync.Mutex
-	bitfield *bitfield.Bitfield
+	bitfield bitfield.Bitfield
 	pending  map[int]*PieceWork
 	keys     []int
 }
 
-func NewScheduler(m *metadata.Metadata, bitfield *bitfield.Bitfield) (*Scheduler, error) {
+func NewScheduler(m *metadata.Metadata, bitfield bitfield.Bitfield) (*Scheduler, error) {
 	pieceHashes := m.Info.Pieces
 	pieceLength := m.Info.PieceLength
 	torrentSize := m.Info.TotalLength()
