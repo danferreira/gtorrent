@@ -33,6 +33,12 @@ type RequestPayload struct {
 	Length uint32
 }
 
+type PiecePayload struct {
+	Index uint32
+	Begin uint32
+	Data  []byte
+}
+
 func (m *Message) Serialize() []byte {
 	if m == nil {
 		return make([]byte, 4)
@@ -52,12 +58,12 @@ func Read(reader io.Reader) (*Message, error) {
 		if errors.Is(err, io.EOF) {
 			return nil, io.EOF
 		}
-		return nil, fmt.Errorf("read length: %w", err)
+		return nil, err
 	}
 
 	length := binary.BigEndian.Uint32(msgLen)
 	if length == 0 {
-		slog.Info("Received Keep Alive message")
+		slog.Info("received Keep Alive message")
 
 		return nil, nil
 	}
@@ -89,13 +95,13 @@ func NewRequest(index, begin, length int) Message {
 	}
 }
 
-func NewPiece(index, begin int, data []byte) Message {
+func NewPiece(index, begin int, data []byte) *Message {
 	buff := make([]byte, 8+len(data))
 	binary.BigEndian.PutUint32(buff[0:4], uint32(index))
 	binary.BigEndian.PutUint32(buff[4:], uint32(begin))
 	copy(buff[8:], data)
 
-	return Message{
+	return &Message{
 		ID:      MessagePiece,
 		Payload: buff,
 	}
@@ -111,12 +117,16 @@ func NewHave(index int) Message {
 	}
 }
 
-func (m *Message) AsPiece() (uint32, uint32, []byte) {
+func (m *Message) AsPiece() *PiecePayload {
 	index := binary.BigEndian.Uint32(m.Payload[0:4])
 	begin := binary.BigEndian.Uint32(m.Payload[4:8])
 	data := m.Payload[8:]
 
-	return index, begin, data
+	return &PiecePayload{
+		Index: index,
+		Begin: begin,
+		Data:  data,
+	}
 }
 
 func (m *Message) ParseAsHave() int {

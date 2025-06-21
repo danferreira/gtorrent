@@ -52,5 +52,5 @@ func TestTotalLength(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, 1536000, metadata.Info.TotalLength())
+	assert.Equal(t, int64(1536000), metadata.Info.TotalLength())
 }

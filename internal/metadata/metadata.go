@@ -27,7 +27,7 @@ type Info struct {
 
 type FileInfo struct {
 	Path   string
-	Length int
+	Length int64
 }
 
 type torrentFile struct {
@@ -39,13 +39,13 @@ type torrentFileInfo struct {
 	Name        string                `bencode:"name"`
 	Pieces      string                `bencode:"pieces"`
 	PieceLength int                   `bencode:"piece length"`
-	Length      int                   `bencode:"length"`
+	Length      int64                 `bencode:"length"`
 	Files       []torrentFileInfoFile `bencode:"files"`
 }
 
 type torrentFileInfoFile struct {
 	Path   []string `bencode:"path"`
-	Length int      `bencode:"length"`
+	Length int64    `bencode:"length"`
 }
 
 func Parse(path string) (*Metadata, error) {
@@ -128,15 +128,11 @@ func Parse(path string) (*Metadata, error) {
 	}, nil
 }
 
-func (t *Info) TotalLength() int {
-	total := 0
+func (t *Info) TotalLength() int64 {
+	var total int64
 	for _, file := range t.Files {
 		total += file.Length
 	}
 
 	return total
-}
-
-func (m *Metadata) InfoHash() [20]byte {
-	return m.Info.InfoHash
 }
