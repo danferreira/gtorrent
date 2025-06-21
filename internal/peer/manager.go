@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/danferreira/gtorrent/internal/bitfield"
 	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/danferreira/gtorrent/internal/piece"
+	"github.com/danferreira/gtorrent/internal/state"
 	"github.com/danferreira/gtorrent/internal/storage"
 )
 
@@ -19,34 +19,37 @@ type Manager struct {
 	infoHash       [20]byte
 	peerID         [20]byte
 	pieceLength    int
-	bitfield       *bitfield.Bitfield
+	state          *state.State
 	storage        *storage.Storage
 	pool           *Pool
 	maxPeers       int
+	poolInterval   time.Duration
 }
 
-func NewManager(m *metadata.Metadata, bitfield *bitfield.Bitfield, peerID [20]byte, pool *Pool, storage *storage.Storage) *Manager {
+func NewManager(m *metadata.Metadata, state *state.State, peerID [20]byte, pool *Pool, storage *storage.Storage) *Manager {
 	return &Manager{
 		infoHash:       m.Info.InfoHash,
 		peerID:         peerID,
 		connectedPeers: make(map[string]*Connection),
 
 		pieceLength: m.Info.PieceLength,
-		bitfield:    bitfield,
+		state:       state,
 		storage:     storage,
 
-		pool:     pool,
-		maxPeers: 15,
+		pool:         pool,
+		maxPeers:     15,
+		poolInterval: 5 * time.Second,
 	}
 }
 
 func (m *Manager) Run(ctx context.Context, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, inboundConnections <-chan net.Conn) <-chan *piece.PieceDownloaded {
 	resultChan := make(chan *piece.PieceDownloaded, 100) // buffered channel for results
 
-	go func() {
-		defer close(resultChan)
+	if !m.state.IsCompleted() {
+		go m.outboundConnections(ctx, workChan, failChan, resultChan)
+	}
 
-		ticker := time.NewTicker(1 * time.Second) // housekeeping
+	go func() {
 		for {
 			select {
 			case <-ctx.Done():
@@ -58,14 +61,6 @@ func (m *Manager) Run(ctx context.Context, workChan <-chan *piece.PieceWork, fai
 						c.Close()
 					}
 				}()
-			case <-ticker.C:
-				// fill up to MaxPeers
-				if m.countPeers() < m.maxPeers {
-					peer, ok := m.pool.Pop()
-					if ok {
-						go m.outboundConnection(ctx, peer, workChan, failChan, resultChan)
-					}
-				}
 			}
 		}
 	}()
@@ -73,8 +68,33 @@ func (m *Manager) Run(ctx context.Context, workChan <-chan *piece.PieceWork, fai
 	return resultChan
 }
 
+func (m *Manager) outboundConnections(ctx context.Context, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan<- *piece.PieceDownloaded) {
+	ticker := time.NewTicker(m.poolInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if m.state.IsCompleted() {
+				return
+			}
+
+			// fill up to MaxPeers
+			if m.countPeers() < m.maxPeers {
+				peer, ok := m.pool.Pop()
+				if ok {
+					if peer.Addr != "127.0.0.1:6881" {
+						go m.outboundConnection(ctx, peer, workChan, failChan, resultChan)
+					}
+				}
+			}
+		}
+	}
+}
+
 func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, downloadedChan chan<- *piece.PieceDownloaded) {
-	c := newConnection(&p, m.pieceLength, m.bitfield, m.storage)
+	c := newConnection(&p, m.pieceLength, m.state.GetBitfield(), m.storage)
 	if err := c.dial(m.infoHash, m.peerID); err != nil {
 		slog.Error("error during connection", "error", err)
 		return
@@ -91,7 +111,7 @@ func (m *Manager) inboundConnection(ctx context.Context, conn net.Conn, workChan
 		Addr: conn.RemoteAddr().String(),
 	}
 
-	c := newConnection(p, m.pieceLength, m.bitfield, m.storage)
+	c := newConnection(p, m.pieceLength, m.state.GetBitfield(), m.storage)
 	if err := c.accept(conn, m.infoHash, m.peerID); err != nil {
 		return err
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/danferreira/gtorrent/internal/message"
 	"github.com/danferreira/gtorrent/internal/metadata"
 	"github.com/danferreira/gtorrent/internal/piece"
+	"github.com/danferreira/gtorrent/internal/state"
 	"github.com/danferreira/gtorrent/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,18 +25,18 @@ func TestNewManager(t *testing.T) {
 			PieceLength: 16384,
 		},
 	}
-	bf := &bitfield.Bitfield{0b11011011}
 	peerID := [20]byte{0x99, 0x88, 0x77}
 	pool := NewPool(10)
 	storage := &storage.Storage{}
+	state := &state.State{Bitfield: bitfield.Bitfield{0b11100000}, Left: 1000}
 
-	manager := NewManager(m, bf, peerID, pool, storage)
+	manager := NewManager(m, state, peerID, pool, storage)
 
 	assert.NotNil(t, manager)
 	assert.Equal(t, m.Info.InfoHash, manager.infoHash)
 	assert.Equal(t, peerID, manager.peerID)
+	assert.Equal(t, state, manager.state)
 	assert.Equal(t, m.Info.PieceLength, manager.pieceLength)
-	assert.Equal(t, bf, manager.bitfield)
 	assert.Equal(t, storage, manager.storage)
 	assert.NotNil(t, manager.connectedPeers)
 	assert.Equal(t, 0, len(manager.connectedPeers))
@@ -54,27 +55,29 @@ func TestInboundConnection(t *testing.T) {
 		},
 	}
 	pool := NewPool(1)
-	manager := NewManager(m, &bitfield.Bitfield{0b10000000}, PeerID, pool, &storage.Storage{})
+	state := &state.State{Bitfield: bitfield.Bitfield{0b11100000}, Left: 1000}
+	manager := NewManager(m, state, PeerID, pool, &storage.Storage{})
 
 	// Set up channels
 	workChan := make(chan *piece.PieceWork, 10)
 	failChan := make(chan *piece.PieceWork, 10)
 	inboundedChan := make(chan net.Conn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	_ = manager.Run(ctx, workChan, failChan, inboundedChan)
 
 	go func() {
 		_, _ = handshake.Read(server)
-		_, _ = message.Read(server)
-
-		cancel()
+		_, err := message.Read(server)
+		require.NoError(t, err)
 	}()
 
-	time.Sleep(300 * time.Millisecond)
-	assert.True(t, manager.countPeers() > 0)
+	inboundedChan <- client
+
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 1, manager.countPeers())
 
 	<-ctx.Done()
 }
@@ -100,15 +103,15 @@ func TestOutboundConnection(t *testing.T) {
 	pool := NewPool(1)
 	pool.PushMany([]Peer{peer})
 
-	manager := NewManager(m, &bitfield.Bitfield{0b10000000}, PeerID, pool, &storage.Storage{})
-	manager.maxPeers = 1
+	manager := NewManager(m, &state.State{Bitfield: bitfield.Bitfield{0b11100000}, Left: 1000}, PeerID, pool, &storage.Storage{})
+	manager.poolInterval = 100 * time.Millisecond
 
 	// Set up channels
 	workChan := make(chan *piece.PieceWork, 10)
 	failChan := make(chan *piece.PieceWork, 10)
 	inboundedChan := make(chan net.Conn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
 	_ = manager.Run(ctx, workChan, failChan, inboundedChan)
@@ -128,7 +131,7 @@ func TestOutboundConnection(t *testing.T) {
 		ch.Write(conn)
 		message.Read(conn)
 
-		assert.True(t, manager.countPeers() > 0)
+		assert.Equal(t, 1, manager.countPeers())
 
 		cancel()
 	}()
