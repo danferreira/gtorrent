@@ -72,6 +72,10 @@ func (s *Storage) ReadAt(buf []byte, start int64) (int, error) {
 		}
 
 		amount := actualEnd - actualStart
+		if amount <= 0 {
+			offset += file.Length
+			continue
+		}
 		m, err := file.File.ReadAt(buf[n:n+int(amount)], actualStart)
 		n += m
 		if err != nil && !errors.Is(err, io.EOF) {

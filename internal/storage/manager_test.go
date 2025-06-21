@@ -49,7 +49,8 @@ func TestScanDisk(t *testing.T) {
 				},
 			}
 
-			got := NewManager(st).ScanDisk(md)
+			got, err := NewManager(st).ScanDisk(md)
+			require.NoError(t, err)
 			require.Equal(t, tc.wantBits, got)
 		})
 	}

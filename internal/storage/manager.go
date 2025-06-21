@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto/sha1"
+	"errors"
 	"io"
 	"log/slog"
 
@@ -20,7 +21,7 @@ func NewManager(storage io.ReaderAt) *Manager {
 	}
 }
 
-func (mgr *Manager) ScanDisk(m *metadata.Metadata) bitfield.Bitfield {
+func (mgr *Manager) ScanDisk(m *metadata.Metadata) (bitfield.Bitfield, error) {
 	pieceHashes := m.Info.Pieces
 	pieceLength := m.Info.PieceLength
 	torrentSize := m.Info.TotalLength()
@@ -36,13 +37,12 @@ func (mgr *Manager) ScanDisk(m *metadata.Metadata) bitfield.Bitfield {
 		}
 
 		actualPieceLength := end - begin
-
 		buf := make([]byte, actualPieceLength)
 
 		_, err := mgr.storage.ReadAt(buf, begin)
-		if err != nil {
+		if err != nil && !errors.Is(err, io.EOF) {
 			slog.Error("scan disk error", "error", err)
-			continue
+			return nil, err
 		}
 
 		if checkIntegrity(ph, buf) {
@@ -50,7 +50,7 @@ func (mgr *Manager) ScanDisk(m *metadata.Metadata) bitfield.Bitfield {
 		}
 	}
 
-	return bitfield
+	return bitfield, nil
 }
 
 func checkIntegrity(expectedHash [20]byte, data []byte) bool {

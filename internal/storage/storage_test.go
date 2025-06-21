@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,6 +66,47 @@ func TestReadAt(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, tt.len, v)
 		assert.Equal(t, []byte(tt.expected), buf)
+	}
+}
+
+func TestReadAtEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	paths := []string{
+		filepath.Join(tmp, "zero1.bin"),
+		filepath.Join(tmp, "zero2.bin"),
+	}
+	for _, p := range paths {
+		_, err := os.Create(p)
+		require.NoError(t, err)
+	}
+
+	files := []metadata.FileInfo{
+		{Path: paths[0], Length: 5},
+		{Path: paths[1], Length: 5},
+	}
+
+	st, err := NewStorage(files)
+	require.NoError(t, err)
+	defer st.CloseFiles()
+
+	tests := map[string]struct {
+		start    int64
+		len      int
+		expected string
+	}{
+		"read from first file":           {0, 5, ""},
+		"read from second file":          {5, 5, ""},
+		"partially read from both files": {3, 5, ""},
+	}
+
+	for _, tt := range tests {
+		buf := make([]byte, tt.len)
+		n, err := st.ReadAt(buf, tt.start)
+		assert.Equal(t, 0, n)
+		require.ErrorIs(t, err, io.EOF)
+
+		// Buffer must remain zero-filled.
+		require.Equal(t, make([]byte, tt.len), buf)
 	}
 }
 
