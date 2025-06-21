@@ -75,6 +75,7 @@ func NewDefaultConnectionConfig() ConnectionConfig {
 }
 
 type Connection struct {
+	mu      sync.Mutex
 	conn    net.Conn
 	peer    *Peer
 	storage Storage
@@ -89,8 +90,8 @@ type Connection struct {
 	peerChoking      bool
 	peerInterested   bool
 
-	peerBitfield *bitfield.Bitfield
-	ownBitfield  *bitfield.Bitfield
+	peerBitfield bitfield.Bitfield
+	ownBitfield  bitfield.Bitfield
 
 	outgoing      chan *message.Message
 	workRequested chan struct{} // Signal when ready for work
@@ -111,7 +112,7 @@ type Storage interface {
 	WriteAt(data []byte, start int64) (int, error)
 }
 
-func newConnection(p *Peer, pieceLen int, bf *bitfield.Bitfield, storage Storage) *Connection {
+func newConnection(p *Peer, pieceLen int, bf bitfield.Bitfield, storage Storage) *Connection {
 	return &Connection{
 		peer: p,
 
@@ -208,7 +209,7 @@ func (c *Connection) messageReader(ctx context.Context, done chan<- *piece.Piece
 			msg, err := message.Read(c.conn)
 			if err != nil {
 				if c.isConnectionClosed(err) {
-					c.logger.Info("peer closed")
+					c.logger.Info("connection closed")
 				} else {
 					c.logger.Error("failed to read message", "error", err)
 				}
@@ -353,7 +354,7 @@ func (c *Connection) handleMessage(m *message.Message, done chan<- *piece.PieceD
 		return c.handleHave(index)
 	case message.MessageBitfield:
 		bf := bitfield.Bitfield(m.Payload)
-		return c.handleBitfield(&bf)
+		return c.handleBitfield(bf)
 	case message.MessageRequest:
 		request, err := m.ParseAsRequest()
 		if err != nil {
@@ -428,7 +429,7 @@ func (c *Connection) handleHave(index int) error {
 	return nil
 }
 
-func (c *Connection) handleBitfield(bf *bitfield.Bitfield) error {
+func (c *Connection) handleBitfield(bf bitfield.Bitfield) error {
 	c.logger.Info("received bitfield from peer")
 
 	if c.bitfieldReceived {
@@ -439,7 +440,7 @@ func (c *Connection) handleBitfield(bf *bitfield.Bitfield) error {
 	c.peerBitfield = bf
 
 	shouldBeInterested := false
-	for i := 0; i < len(*bf); i++ {
+	for i := 0; i < len(bf); i++ {
 		if bf.HasPiece(i) && !c.ownBitfield.HasPiece(i) {
 			shouldBeInterested = true
 			break
@@ -505,7 +506,7 @@ func (c *Connection) handlePiece(p *message.PiecePayload, done chan<- *piece.Pie
 		pw := pendingPiece.pw
 
 		// remove from pending pieces
-		delete(c.pendingPieces, int(p.Index))
+		c.deletePendingPiece(int(p.Index))
 
 		// send downloaded piece to channel
 		done <- &piece.PieceDownloaded{
@@ -554,15 +555,15 @@ func (c *Connection) writeMessage(msg *message.Message) error {
 }
 
 func (c *Connection) sendBitfield() error {
-	if c.ownBitfield == nil || len(*c.ownBitfield) == 0 {
+	if c.ownBitfield == nil {
 		return errors.New("no bitfield to send")
 	}
 
-	c.logger.Debug("sending bitfield")
+	c.logger.Info("sending bitfield")
 
 	c.writeMessage(&message.Message{
 		ID:      message.MessageBitfield,
-		Payload: *c.ownBitfield,
+		Payload: c.ownBitfield,
 	})
 
 	return nil
@@ -592,7 +593,8 @@ func (c *Connection) checkTimeouts(fail chan<- *piece.PieceWork) {
 	for index, pending := range c.pendingPieces {
 		if now.Sub(pending.timestamp) > 60*time.Second { // 60 second timeout
 			c.logger.Warn("piece request timed out", "index", index)
-			delete(c.pendingPieces, index)
+
+			c.deletePendingPiece(index)
 			select {
 			case fail <- pending.pw:
 			default:
@@ -601,7 +603,11 @@ func (c *Connection) checkTimeouts(fail chan<- *piece.PieceWork) {
 		}
 	}
 }
-
+func (c *Connection) deletePendingPiece(index int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pendingPieces, index)
+}
 func sendHandshake(conn net.Conn, infoHash, peerID [20]byte) error {
 	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return fmt.Errorf("failed to set write deadline: %w", err)

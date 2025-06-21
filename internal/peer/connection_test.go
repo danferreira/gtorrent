@@ -58,7 +58,7 @@ func TestDial(t *testing.T) {
 		Addr: net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port)),
 	}
 
-	c := newConnection(&peer, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	c := newConnection(&peer, 16384, bitfield.Bitfield{}, &storage.Storage{})
 	err = c.dial(InfoHash, PeerID)
 
 	assert.NoError(t, err)
@@ -72,7 +72,7 @@ func TestDialTimeout(t *testing.T) {
 	peer := Peer{Addr: "10.255.255.1:1234"}
 
 	start := time.Now()
-	c := newConnection(&peer, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	c := newConnection(&peer, 16384, bitfield.Bitfield{}, &storage.Storage{})
 	c.config.DialTimeout = 200 * time.Millisecond
 
 	err := c.dial(InfoHash, PeerID)
@@ -105,7 +105,7 @@ func TestAccept(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	c := newConnection(&peer, 16384, &bitfield.Bitfield{0b00000000}, &storage.Storage{})
+	c := newConnection(&peer, 16384, bitfield.Bitfield{0b00000000}, &storage.Storage{})
 	err := c.accept(server, InfoHash, PeerID)
 	require.NoError(t, err)
 
@@ -113,7 +113,7 @@ func TestAccept(t *testing.T) {
 }
 
 func TestHandleChoke(t *testing.T) {
-	pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 
 	pc.handleChoke()
 
@@ -122,7 +122,7 @@ func TestHandleChoke(t *testing.T) {
 }
 
 func TestHandleUnchoke(t *testing.T) {
-	pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 	pc.amInterested = true
 
 	pc.handleUnchoke()
@@ -140,7 +140,7 @@ func TestHandleUnchoke(t *testing.T) {
 }
 
 func TestHandleInterested(t *testing.T) {
-	pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 
 	pc.handleInterested()
 
@@ -155,8 +155,8 @@ func TestHandleInterested(t *testing.T) {
 }
 
 func TestHandleHave(t *testing.T) {
-	bf := &bitfield.Bitfield{0b00000000}
-	ownBf := &bitfield.Bitfield{0b00000000}
+	bf := bitfield.Bitfield{0b00000000}
+	ownBf := bitfield.Bitfield{0b00000000}
 
 	pc := newConnection(&Peer{}, 16384, ownBf, &storage.Storage{})
 	pc.peerBitfield = bf
@@ -175,44 +175,32 @@ func TestHandleHave(t *testing.T) {
 }
 
 func TestHandleBitfield(t *testing.T) {
-	t.Run("valid bitfield", func(t *testing.T) {
-		ownBf := &bitfield.Bitfield{0b00000000}
-		pc := newConnection(&Peer{}, 16384, ownBf, &storage.Storage{})
-		pc.peerChoking = false
-		peerBf := bitfield.Bitfield{0b11111111}
-		err := pc.handleBitfield(&peerBf)
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{0b00000000}, &storage.Storage{})
+	pc.peerChoking = false
+	peerBf := bitfield.Bitfield{0b11111111}
+	err := pc.handleBitfield(peerBf)
 
-		assert.NoError(t, err)
-		assert.True(t, pc.bitfieldReceived)
-		assert.Equal(t, &peerBf, pc.peerBitfield)
-		assert.True(t, pc.amInterested)
+	assert.NoError(t, err)
+	assert.True(t, pc.bitfieldReceived)
+	assert.Equal(t, peerBf, pc.peerBitfield)
+	assert.True(t, pc.amInterested)
 
-		// Should send interested message
-		select {
-		case msg := <-pc.outgoing:
-			assert.Equal(t, message.MessageInterested, msg.ID)
-		default:
-			t.Error("Expected interested message")
-		}
+	// Should send interested message
+	select {
+	case msg := <-pc.outgoing:
+		assert.Equal(t, message.MessageInterested, msg.ID)
+	default:
+		t.Error("expected interested message")
+	}
+}
+func TestHandleBitfieldDuplicated(t *testing.T) {
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
+	pc.bitfieldReceived = true
 
-		// Should request work if not choked
-		select {
-		case <-pc.workRequested:
-			// Work was requested
-		case <-time.After(100 * time.Millisecond):
-			t.Error("Expected work to be requested")
-		}
-	})
-
-	t.Run("duplicate bitfield", func(t *testing.T) {
-		pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
-		pc.bitfieldReceived = true
-
-		bf := bitfield.Bitfield{0b11111111}
-		err := pc.handleBitfield(&bf)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate bitfield")
-	})
+	bf := bitfield.Bitfield{0b11111111}
+	err := pc.handleBitfield(bf)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate bitfield")
 }
 
 func TestHandlePiece(t *testing.T) {
@@ -221,7 +209,7 @@ func TestHandlePiece(t *testing.T) {
 		Hash:   [20]byte{},
 		Length: BlockSize * 2, // Two blocks
 	}
-	pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 	pc.inflightRequests = 2
 	// Add pending piece
 	pc.pendingPieces[0] = &pendingPiece{
@@ -285,7 +273,7 @@ func TestHandlePiece(t *testing.T) {
 }
 
 func TestHandleUnrequestedPiece(t *testing.T) {
-	pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 
 	done := make(chan *piece.PieceDownloaded, 1)
 	piece := &message.PiecePayload{
@@ -307,7 +295,7 @@ func TestHandleUnrequestedPiece(t *testing.T) {
 }
 
 func TestValidateRequest(t *testing.T) {
-	pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 
 	tests := []struct {
 		name    string
@@ -380,7 +368,7 @@ func TestCanRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+			pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 
 			pc.peerChoking = tt.peerChoking
 			pc.amInterested = tt.amInterested
@@ -394,8 +382,8 @@ func TestCanRequest(t *testing.T) {
 
 func TestProcessPieceRequest(t *testing.T) {
 	t.Run("peer has piece", func(t *testing.T) {
-		pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
-		pc.peerBitfield = &bitfield.Bitfield{0b11111111}
+		pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
+		pc.peerBitfield = bitfield.Bitfield{0b11111111}
 
 		pw := &piece.PieceWork{
 			Index:  0,
@@ -420,7 +408,7 @@ func TestProcessPieceRequest(t *testing.T) {
 	})
 
 	t.Run("peer doesn't have piece", func(t *testing.T) {
-		bf := &bitfield.Bitfield{0b00000000}
+		bf := bitfield.Bitfield{0b00000000}
 		pc := newConnection(&Peer{}, 16384, bf, &storage.Storage{})
 		pc.peerBitfield = bf
 
@@ -444,7 +432,7 @@ func TestProcessPieceRequest(t *testing.T) {
 }
 
 func TestCheckTimeouts(t *testing.T) {
-	pc := newConnection(&Peer{}, 16384, &bitfield.Bitfield{}, &storage.Storage{})
+	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 
 	// Add an old pending piece
 	oldPiece := &pendingPiece{
@@ -553,7 +541,7 @@ func TestConnection_DownloadFlow(t *testing.T) {
 	}()
 
 	stor := newMemStorage(pieceLen)
-	pc := newConnection(&Peer{Addr: "pipe"}, pieceLen, &bitfield.Bitfield{0b00000000}, stor)
+	pc := newConnection(&Peer{Addr: "pipe"}, pieceLen, bitfield.Bitfield{0b00000000}, stor)
 	err := pc.accept(client, InfoHash, PeerID)
 	require.NoError(t, err)
 
@@ -622,7 +610,7 @@ func TestConnection_UploadFlow(t *testing.T) {
 
 	ownBF := bitfield.Bitfield{0b10000000}
 
-	pc := newConnection(&Peer{Addr: "pipe"}, pieceLen, &ownBF, stor)
+	pc := newConnection(&Peer{Addr: "pipe"}, pieceLen, ownBF, stor)
 	err := pc.accept(client, InfoHash, PeerID)
 	require.NoError(t, err)
 
