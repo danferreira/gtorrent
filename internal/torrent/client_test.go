@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/danferreira/gtorrent/internal/metadata"
+	"github.com/danferreira/gtorrent/internal/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +21,10 @@ func (m MockTorrentRunner) Start(ctx context.Context) {
 	if m.StartFunc != nil {
 		m.StartFunc(ctx)
 	}
+}
+
+func (m MockTorrentRunner) State() *state.State {
+	return &state.State{}
 }
 
 type MockTorrentFactory struct {
@@ -82,11 +87,11 @@ func TestStartTorrent(t *testing.T) {
 	}
 	client := NewClientWithDeps(mockFactory, Config{ListenPort: 6881})
 
-	infoHash, err := client.AddFile("testdata/file.torrent")
+	ti, err := client.AddFile("testdata/file.torrent")
 	assert.NoError(t, err)
-	assert.Equal(t, mockTorrent.Metadata.Info.InfoHash, infoHash)
+	assert.Equal(t, &mockTorrent.Metadata, ti.Metadata)
 
-	err = client.StartTorrent(infoHash)
+	err = client.StartTorrent(ti.Metadata.Info.InfoHash)
 	assert.NoError(t, err)
 
 	select {
@@ -114,9 +119,9 @@ func TestStartTorrentUnknownHash(t *testing.T) {
 	}
 	client := NewClientWithDeps(mockFactory, Config{ListenPort: 6881})
 
-	infoHash, err := client.AddFile("testdata/file.torrent")
+	ti, err := client.AddFile("testdata/file.torrent")
 	assert.NoError(t, err)
-	assert.Equal(t, mockTorrent.Metadata.Info.InfoHash, infoHash)
+	assert.Equal(t, &mockTorrent.Metadata, ti.Metadata)
 
 	unknownHash := [20]byte{}
 	err = client.StartTorrent(unknownHash)

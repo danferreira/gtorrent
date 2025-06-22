@@ -20,5 +20,5 @@ func TestNewTorrent(t *testing.T) {
 	assert.NotNil(t, tr.trackerManager)
 	assert.NotNil(t, tr.pieceScheduler)
 	assert.NotNil(t, tr.peerManager)
-	assert.NotNil(t, tr.state)
+	assert.NotNil(t, tr.State)
 }

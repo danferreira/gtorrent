@@ -55,7 +55,7 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 		return nil, err
 	}
 
-	pieceCompleter := piece.NewCompleter(m, str)
+	pieceCompleter := piece.NewCompleter(m, state, str)
 
 	inboundConnections := make(chan net.Conn)
 
@@ -80,6 +80,10 @@ func (t *Torrent) Start(ctx context.Context) {
 	go t.pieceCompleter.Run(ctx, failChan, resultChan)
 
 	<-ctx.Done()
+}
+
+func (t *Torrent) State() *state.State {
+	return t.state
 }
 
 func (t *Torrent) NewInboundConnection(conn net.Conn) {

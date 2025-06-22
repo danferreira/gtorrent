@@ -1,0 +1,239 @@
+package main
+
+import (
+	"encoding/hex"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/filepicker"
+	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/danferreira/gtorrent/internal/torrent"
+)
+
+type mode int
+
+const (
+	modeMain     mode = iota // default
+	modePickFile             // show file-picker in a dialog
+)
+
+type model struct {
+	table      table.Model
+	filepicker filepicker.Model
+	uiMode     mode
+	quitting   bool
+
+	err    string
+	client *torrent.Client
+
+	torrents []*torrent.TorrentInfo
+}
+
+func (m model) Init() tea.Cmd {
+	return tea.Batch(m.filepicker.Init(), tickCmd())
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch m.uiMode {
+	case modeMain:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				m.quitting = true
+				return m, tea.Quit
+
+			case "o":
+				m.uiMode = modePickFile
+				return m, m.filepicker.Init()
+			}
+			m.table, cmd = m.table.Update(msg)
+			return m, cmd
+		case newTorrentMsg:
+			m.torrents = append(m.torrents, msg.t)
+			m.updateRows()
+			m.table.SetCursor(len(m.table.Rows()) - 1)
+			return m, nil
+		case tickMsg:
+			m.updateRows()
+			return m, tickCmd()
+		}
+		return m, nil
+	case modePickFile:
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.String() {
+			case "ctrl+c", "esc", "q":
+				m.uiMode = modeMain
+				return m, nil
+			}
+		}
+
+		m.filepicker, cmd = m.filepicker.Update(msg)
+
+		if didSelect, path := m.filepicker.DidSelectFile(msg); didSelect {
+			m.uiMode = modeMain
+
+			return m, tea.Batch(cmd, m.addTorrent(path), tickCmd())
+		}
+		return m, cmd
+	}
+
+	return m, cmd
+}
+
+type newTorrentMsg struct {
+	t *torrent.TorrentInfo
+}
+
+type errMsg struct {
+	err error
+}
+
+func (m model) addTorrent(path string) tea.Cmd {
+	return func() tea.Msg {
+		t, err := m.client.AddFile(path)
+		if err != nil {
+			return errMsg{err}
+		}
+
+		err = m.client.StartTorrent(t.Metadata.Info.InfoHash)
+		if err != nil {
+			return errMsg{err}
+		}
+
+		return newTorrentMsg{
+			t: t,
+		}
+	}
+}
+
+var (
+	tableStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder())
+	infoBoxStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1).Width(68)
+
+	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render
+)
+
+func (m *model) updateRows() {
+	rows := make([]table.Row, 0, len(m.torrents))
+	for i, ti := range m.torrents {
+		d, _, _ := ti.State.Snapshot()
+		pct := float64(d) / float64(ti.Metadata.Info.TotalLength()) * 100
+		rows = append(rows, table.Row{
+			fmt.Sprint(i + 1),
+			ti.Metadata.Info.Name,
+			fmt.Sprintf("%5.1f%%", pct),
+		})
+	}
+	m.table.SetRows(rows)
+}
+
+func (m *model) updateInfoBox() string {
+	if len(m.torrents) == 0 {
+		return infoBoxStyle.Render("No torrent")
+	}
+
+	i := m.table.Cursor()
+	if i < 0 {
+		return infoBoxStyle.Render("Select a torrent")
+	}
+	info := strings.Builder{}
+
+	t := m.torrents[i]
+
+	const bytesInMB = 1024 * 1024
+
+	megabytes := float64(t.Metadata.Info.TotalLength()) / bytesInMB
+
+	info.WriteString("\n")
+	info.WriteString(fmt.Sprintf("Hash: %s", hex.EncodeToString(t.Metadata.Info.InfoHash[:])))
+	info.WriteString("\n")
+	info.WriteString(fmt.Sprintf("Size: %.2fMB", megabytes))
+
+	return infoBoxStyle.Render(info.String())
+}
+
+func (m model) View() string {
+	if m.quitting {
+		return ""
+	}
+
+	if m.uiMode == modePickFile {
+		return "Open torrent:" + " " + m.filepicker.CurrentDirectory + "\n\n" + m.filepicker.View()
+	}
+
+	infoBox := m.updateInfoBox()
+
+	return lipgloss.JoinVertical(lipgloss.Left, tableStyle.Render(m.table.View()), infoBox,
+		helpStyle("\no: open • s: start • p: pause • d: delete • q: quit\n"))
+}
+
+func configurePicker() filepicker.Model {
+	fp := filepicker.New()
+	fp.AllowedTypes = []string{".torrent"}
+
+	return fp
+}
+
+func configureTable() table.Model {
+	columns := []table.Column{
+		{Title: "#", Width: 2},
+		{Title: "File", Width: 30},
+		{Title: "Progress", Width: 30},
+	}
+
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(7),
+	)
+
+	s := table.DefaultStyles()
+	s.Header = s.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		BorderBottom(true).
+		Bold(false)
+	s.Selected = s.Selected.
+		Foreground(lipgloss.Color("229")).
+		Background(lipgloss.Color("57")).
+		Bold(false)
+	t.SetStyles(s)
+
+	return t
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	fp := configurePicker()
+	t := configureTable()
+
+	c := torrent.NewClient(torrent.Config{
+		ListenPort: 6881,
+	})
+
+	m := model{filepicker: fp, table: t, client: c}
+
+	if _, err := tea.NewProgram(m).Run(); err != nil {
+		fmt.Println("Error running program:", err)
+		os.Exit(1)
+	}
+}
+
+type tickMsg time.Time
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}

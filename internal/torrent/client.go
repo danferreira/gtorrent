@@ -12,6 +12,7 @@ import (
 
 	"github.com/danferreira/gtorrent/internal/handshake"
 	"github.com/danferreira/gtorrent/internal/metadata"
+	"github.com/danferreira/gtorrent/internal/state"
 )
 
 type TorrentFactory interface {
@@ -20,6 +21,7 @@ type TorrentFactory interface {
 
 type TorrentRunner interface {
 	Start(ctx context.Context)
+	State() *state.State
 }
 
 type DefaultTorrentFactory struct{}
@@ -69,11 +71,11 @@ func NewClientWithDeps(factory TorrentFactory, config Config) *Client {
 	return e
 }
 
-func (c *Client) AddFile(path string) ([20]byte, error) {
+func (c *Client) AddFile(path string) (*TorrentInfo, error) {
 	slog.Info("adding new file", "path", path)
 	m, err := metadata.Parse(path)
 	if err != nil {
-		return [20]byte{}, fmt.Errorf("failed to parse torrent file %s: %w", path, err)
+		return nil, fmt.Errorf("failed to parse torrent file %s: %w", path, err)
 	}
 
 	infoHash := m.Info.InfoHash
@@ -81,17 +83,22 @@ func (c *Client) AddFile(path string) ([20]byte, error) {
 	defer c.mu.Unlock()
 
 	if _, ok := c.torrents[infoHash]; ok {
-		return infoHash, fmt.Errorf("torrent already added: %s", path)
+		return nil, fmt.Errorf("torrent already added: %s", path)
 	}
 
 	t, err := c.torrentFactory.NewTorrent(m, c.peerID, c.config.ListenPort)
 	if err != nil {
-		return infoHash, fmt.Errorf("failed to create torrent: %w", err)
+		return nil, fmt.Errorf("failed to create torrent: %w", err)
 	}
 
 	c.torrents[infoHash] = t
 
-	return infoHash, nil
+	ti := &TorrentInfo{
+		Metadata: m,
+		State:    t.State(),
+	}
+
+	return ti, nil
 }
 
 func (c *Client) StartTorrent(infoHash [20]byte) error {
