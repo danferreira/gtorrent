@@ -36,6 +36,7 @@ type State struct {
 
 	status Status
 
+	peers      int
 	downloaded int64
 	uploaded   int64
 	size       int64
@@ -129,6 +130,26 @@ func (s *State) SetStatus(st Status) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status = st
+}
+
+func (s *State) Peers() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.peers
+}
+
+func (s *State) IncreasePeers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peers++
+}
+
+func (s *State) DecreasePeers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.peers > 0 {
+		s.peers--
+	}
 }
 
 func checkIntegrity(expectedHash [20]byte, data []byte) bool {

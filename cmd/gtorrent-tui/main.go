@@ -19,7 +19,7 @@ import (
 var (
 	tableStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder())
-	infoBoxStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1).Width(70)
+	infoBoxStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1).Width(77)
 
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render
 )
@@ -192,6 +192,7 @@ func (m *model) updateRows() {
 			ti.Metadata.Info.Name,
 			fmt.Sprintf("%5.1f%%", pct),
 			ti.State.Status().String(),
+			fmt.Sprint(ti.State.Peers()),
 		})
 	}
 	m.table.SetRows(rows)
@@ -242,8 +243,9 @@ func configureTable() table.Model {
 	columns := []table.Column{
 		{Title: "#", Width: 2},
 		{Title: "File", Width: 30},
-		{Title: "Progress", Width: 15},
+		{Title: "Progress", Width: 10},
 		{Title: "Status", Width: 15},
+		{Title: "Peers", Width: 10},
 	}
 
 	t := table.New(

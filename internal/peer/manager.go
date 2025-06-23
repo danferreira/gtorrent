@@ -128,6 +128,8 @@ func (m *Manager) addConnectedPeer(pc *Connection) {
 	m.connectedPeers[pc.peer.Addr] = pc
 	m.mu.Unlock()
 
+	m.state.IncreasePeers()
+
 	go func() {
 		<-pc.done // blocks until connection exits
 		m.removePeer(pc.peer.Addr)
@@ -138,6 +140,8 @@ func (m *Manager) removePeer(addr string) {
 	m.mu.Lock()
 	delete(m.connectedPeers, addr)
 	m.mu.Unlock()
+
+	m.state.DecreasePeers()
 }
 
 func (m *Manager) countPeers() int {
