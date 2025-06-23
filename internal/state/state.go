@@ -12,9 +12,29 @@ import (
 	"github.com/danferreira/gtorrent/internal/metadata"
 )
 
+type Status uint8
+
+const (
+	Stopped Status = iota
+	Downloading
+)
+
+func (s Status) String() string {
+	switch s {
+	case Stopped:
+		return "Stopped"
+	case Downloading:
+		return "Downloading"
+	}
+
+	return ""
+}
+
 type State struct {
 	mu       sync.RWMutex
 	Bitfield bitfield.Bitfield
+
+	status Status
 
 	downloaded int64
 	uploaded   int64
@@ -97,6 +117,18 @@ func (s *State) Snapshot() (int64, int64, int64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.downloaded, s.uploaded, s.Left
+}
+
+func (s *State) Status() Status {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.status
+}
+
+func (s *State) SetStatus(st Status) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status = st
 }
 
 func checkIntegrity(expectedHash [20]byte, data []byte) bool {

@@ -21,7 +21,7 @@ type Torrent struct {
 	mu sync.Mutex
 
 	metadata *metadata.Metadata
-	PeerID   [20]byte
+	peerID   [20]byte
 
 	inboundConnections chan net.Conn
 
@@ -35,6 +35,9 @@ type Torrent struct {
 	storage StorageService
 
 	listenPort int
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent, error) {
@@ -61,7 +64,7 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 
 	return &Torrent{
 		metadata:           m,
-		PeerID:             peerID,
+		peerID:             peerID,
 		trackerManager:     trackerManager,
 		pieceScheduler:     pieceScheduler,
 		peerManager:        peerManager,
@@ -71,17 +74,23 @@ func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent
 	}, nil
 }
 
-func (t *Torrent) Start(ctx context.Context) {
-	defer close(t.inboundConnections)
+func (t *Torrent) Start(parent context.Context) {
+	t.ctx, t.cancel = context.WithCancel(parent)
 
-	go t.trackerManager.Run(ctx, t.state.Snapshot)
-	workChan, failChan := t.pieceScheduler.Run(ctx)
-	resultChan := t.peerManager.Run(ctx, workChan, failChan, t.inboundConnections)
-	go t.pieceCompleter.Run(ctx, failChan, resultChan)
+	go t.trackerManager.Run(t.ctx, t.state.Snapshot)
+	workChan, failChan := t.pieceScheduler.Run(t.ctx)
+	resultChan := t.peerManager.Run(t.ctx, workChan, failChan, t.inboundConnections)
+	go t.pieceCompleter.Run(t.ctx, failChan, resultChan)
 
-	<-ctx.Done()
+	t.state.SetStatus(state.Downloading)
 }
 
+func (t *Torrent) Stop() {
+	if t.cancel != nil {
+		t.cancel()
+		t.state.SetStatus(state.Stopped)
+	}
+}
 func (t *Torrent) State() *state.State {
 	return t.state
 }

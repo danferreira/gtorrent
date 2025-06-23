@@ -32,7 +32,7 @@ func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot) {
 	currentEvent := EventStarted
 
 	for {
-		peers, interval, err := m.SendAnnouncement(ctx, currentEvent, snapshotFn)
+		peers, interval, err := m.sendAnnouncement(ctx, currentEvent, snapshotFn)
 
 		if err != nil {
 			slog.Error("error on tracker announce. Retrying in 10 seconds...", "error", err)
@@ -46,16 +46,20 @@ func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot) {
 		select {
 		case <-time.After(time.Duration(interval) * time.Second):
 		case <-ctx.Done():
-			_, _, err := m.SendAnnouncement(ctx, EventStopped, snapshotFn)
+			newContext, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+
+			_, _, err := m.sendAnnouncement(newContext, EventStopped, snapshotFn)
 			if err != nil {
 				slog.Error("error on sending stop event to tracker", "error", err)
 			}
+
 			return
 		}
 	}
 }
 
-func (m *Manager) SendAnnouncement(ctx context.Context, event Event, snapshotFn Snapshot) ([]peer.Peer, int, error) {
+func (m *Manager) sendAnnouncement(ctx context.Context, event Event, snapshotFn Snapshot) ([]peer.Peer, int, error) {
 	slog.Info("sending announcement to tracker", "event", event)
 	downloaded, uploaded, left := snapshotFn()
 	receivedPeers, interval, err := m.tracker.Announce(ctx, event, downloaded, uploaded, left)
@@ -63,5 +67,5 @@ func (m *Manager) SendAnnouncement(ctx context.Context, event Event, snapshotFn 
 		return nil, 0, err
 	}
 
-	return receivedPeers, interval, err
+	return receivedPeers, interval, nil
 }

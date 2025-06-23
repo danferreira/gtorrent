@@ -21,6 +21,7 @@ type TorrentFactory interface {
 
 type TorrentRunner interface {
 	Start(ctx context.Context)
+	Stop()
 	State() *state.State
 }
 
@@ -111,15 +112,22 @@ func (c *Client) StartTorrent(infoHash [20]byte) error {
 		return fmt.Errorf("torrent not found")
 	}
 
-	go func() {
-		defer func() {
-			c.mu.Lock()
-			delete(c.torrents, infoHash)
-			c.mu.Unlock()
-		}()
+	entry.Start(c.ctx)
 
-		entry.Start(c.ctx)
-	}()
+	return nil
+}
+
+func (c *Client) StopTorrent(infoHash [20]byte) error {
+	slog.Info("stopping torrent")
+	c.mu.RLock()
+	entry, exists := c.torrents[infoHash]
+	c.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("torrent not found")
+	}
+
+	entry.Stop()
 
 	return nil
 }

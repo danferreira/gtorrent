@@ -15,11 +15,18 @@ import (
 type MockTorrentRunner struct {
 	Metadata  metadata.Metadata
 	StartFunc func(ctx context.Context) error
+	StopFunc  func() error
 }
 
 func (m MockTorrentRunner) Start(ctx context.Context) {
 	if m.StartFunc != nil {
 		m.StartFunc(ctx)
+	}
+}
+
+func (m MockTorrentRunner) Stop() {
+	if m.StopFunc != nil {
+		m.StopFunc()
 	}
 }
 

@@ -16,6 +16,14 @@ import (
 	"github.com/danferreira/gtorrent/internal/torrent"
 )
 
+var (
+	tableStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder())
+	infoBoxStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1).Width(70)
+
+	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render
+)
+
 type mode int
 
 const (
@@ -35,66 +43,109 @@ type model struct {
 	torrents []*torrent.TorrentInfo
 }
 
-func (m model) Init() tea.Cmd {
-	return tea.Batch(m.filepicker.Init(), tickCmd())
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-
-	switch m.uiMode {
-	case modeMain:
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "ctrl+c", "q":
-				m.quitting = true
-				return m, tea.Quit
-
-			case "o":
-				m.uiMode = modePickFile
-				return m, m.filepicker.Init()
-			}
-			m.table, cmd = m.table.Update(msg)
-			return m, cmd
-		case newTorrentMsg:
-			m.torrents = append(m.torrents, msg.t)
-			m.updateRows()
-			m.table.SetCursor(len(m.table.Rows()) - 1)
-			return m, nil
-		case tickMsg:
-			m.updateRows()
-			return m, tickCmd()
-		}
-		return m, nil
-	case modePickFile:
-		if key, ok := msg.(tea.KeyMsg); ok {
-			switch key.String() {
-			case "ctrl+c", "esc", "q":
-				m.uiMode = modeMain
-				return m, nil
-			}
-		}
-
-		m.filepicker, cmd = m.filepicker.Update(msg)
-
-		if didSelect, path := m.filepicker.DidSelectFile(msg); didSelect {
-			m.uiMode = modeMain
-
-			return m, tea.Batch(cmd, m.addTorrent(path), tickCmd())
-		}
-		return m, cmd
-	}
-
-	return m, cmd
-}
-
 type newTorrentMsg struct {
 	t *torrent.TorrentInfo
 }
 
+type torrentStoppedMsg struct{}
+
 type errMsg struct {
 	err error
+}
+
+type tickMsg time.Time
+
+func (m model) Init() tea.Cmd {
+	return tickCmd()
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch m.uiMode {
+	case modePickFile:
+		return m.updatePicker(msg)
+	default:
+		return m.updateMain(msg)
+	}
+}
+
+func (m model) View() string {
+	if m.quitting {
+		return ""
+	}
+
+	if m.uiMode == modePickFile {
+		return "Open torrent:" + " " + m.filepicker.CurrentDirectory + "\n\n" + m.filepicker.View() + "\n"
+	}
+
+	infoBox := m.updateInfoBox()
+
+	return lipgloss.JoinVertical(lipgloss.Left, tableStyle.Render(m.table.View()), infoBox,
+		helpStyle("\no: open • r: resume • s: stop • d: delete • q: quit\n"))
+}
+
+func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			m.quitting = true
+			return m, tea.Quit
+
+		case "r":
+			selectedTorrent := m.selectedTorrent()
+			if selectedTorrent != nil {
+				return m, m.startTorrent(selectedTorrent)
+			}
+
+			return m, nil
+
+		case "s":
+			selectedTorrent := m.selectedTorrent()
+			if selectedTorrent != nil {
+				return m, m.stopTorrent(selectedTorrent)
+			}
+
+			return m, nil
+
+		case "o":
+			m.uiMode = modePickFile
+			return m, m.filepicker.Init()
+		}
+		var cmd tea.Cmd
+		m.table, cmd = m.table.Update(msg)
+		return m, cmd
+	case newTorrentMsg:
+		m.torrents = append(m.torrents, msg.t)
+		m.updateRows()
+		m.table.SetCursor(len(m.table.Rows()) - 1)
+		return m, nil
+	case tickMsg:
+		m.updateRows()
+		return m, tickCmd()
+	}
+
+	return m, nil
+}
+
+func (m model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "ctrl+c", "esc", "q":
+			m.uiMode = modeMain
+			return m, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	m.filepicker, cmd = m.filepicker.Update(msg)
+
+	if didSelect, path := m.filepicker.DidSelectFile(msg); didSelect {
+		m.uiMode = modeMain
+
+		return m, tea.Batch(cmd, m.addTorrent(path), tickCmd())
+	}
+
+	return m, cmd
 }
 
 func (m model) addTorrent(path string) tea.Cmd {
@@ -115,13 +166,21 @@ func (m model) addTorrent(path string) tea.Cmd {
 	}
 }
 
-var (
-	tableStyle = lipgloss.NewStyle().
-			BorderStyle(lipgloss.NormalBorder())
-	infoBoxStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1).Width(68)
+func (m model) startTorrent(t *torrent.TorrentInfo) tea.Cmd {
+	return func() tea.Msg {
+		m.client.StartTorrent(t.Metadata.Info.InfoHash)
 
-	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render
-)
+		return torrentStoppedMsg{}
+	}
+}
+
+func (m model) stopTorrent(t *torrent.TorrentInfo) tea.Cmd {
+	return func() tea.Msg {
+		m.client.StopTorrent(t.Metadata.Info.InfoHash)
+
+		return torrentStoppedMsg{}
+	}
+}
 
 func (m *model) updateRows() {
 	rows := make([]table.Row, 0, len(m.torrents))
@@ -132,6 +191,7 @@ func (m *model) updateRows() {
 			fmt.Sprint(i + 1),
 			ti.Metadata.Info.Name,
 			fmt.Sprintf("%5.1f%%", pct),
+			ti.State.Status().String(),
 		})
 	}
 	m.table.SetRows(rows)
@@ -162,19 +222,13 @@ func (m *model) updateInfoBox() string {
 	return infoBoxStyle.Render(info.String())
 }
 
-func (m model) View() string {
-	if m.quitting {
-		return ""
+func (m model) selectedTorrent() *torrent.TorrentInfo {
+	cursor := m.table.Cursor()
+	if cursor < 0 || cursor >= len(m.table.Rows()) {
+		return nil
 	}
 
-	if m.uiMode == modePickFile {
-		return "Open torrent:" + " " + m.filepicker.CurrentDirectory + "\n\n" + m.filepicker.View()
-	}
-
-	infoBox := m.updateInfoBox()
-
-	return lipgloss.JoinVertical(lipgloss.Left, tableStyle.Render(m.table.View()), infoBox,
-		helpStyle("\no: open • s: start • p: pause • d: delete • q: quit\n"))
+	return m.torrents[cursor]
 }
 
 func configurePicker() filepicker.Model {
@@ -188,7 +242,8 @@ func configureTable() table.Model {
 	columns := []table.Column{
 		{Title: "#", Width: 2},
 		{Title: "File", Width: 30},
-		{Title: "Progress", Width: 30},
+		{Title: "Progress", Width: 15},
+		{Title: "Status", Width: 15},
 	}
 
 	t := table.New(
@@ -212,6 +267,12 @@ func configureTable() table.Model {
 	return t
 }
 
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -224,16 +285,8 @@ func main() {
 
 	m := model{filepicker: fp, table: t, client: c}
 
-	if _, err := tea.NewProgram(m).Run(); err != nil {
+	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
 	}
-}
-
-type tickMsg time.Time
-
-func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
 }

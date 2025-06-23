@@ -15,7 +15,7 @@ func TestNewTorrent(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, tr)
 	assert.Equal(t, m, tr.metadata)
-	assert.Equal(t, pid, tr.PeerID)
+	assert.Equal(t, pid, tr.peerID)
 	assert.NotNil(t, tr.inboundConnections)
 	assert.NotNil(t, tr.trackerManager)
 	assert.NotNil(t, tr.pieceScheduler)
