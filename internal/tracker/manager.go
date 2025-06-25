@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/danferreira/gtorrent/internal/peer"
+	"github.com/danferreira/gtorrent/internal/state"
 )
 
 type TrackerAnnouncer interface {
@@ -24,9 +25,9 @@ func NewManager(tracker TrackerAnnouncer, pool *peer.Pool) *Manager {
 	}
 }
 
-type Snapshot func() (int64, int64, int64)
+type SnapshotFn func() state.Stats
 
-func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot) {
+func (m *Manager) Run(ctx context.Context, snapshotFn SnapshotFn) {
 	slog.Info("starting announce worker")
 
 	currentEvent := EventStarted
@@ -59,10 +60,10 @@ func (m *Manager) Run(ctx context.Context, snapshotFn Snapshot) {
 	}
 }
 
-func (m *Manager) sendAnnouncement(ctx context.Context, event Event, snapshotFn Snapshot) ([]peer.Peer, int, error) {
+func (m *Manager) sendAnnouncement(ctx context.Context, event Event, snapshotFn SnapshotFn) ([]peer.Peer, int, error) {
 	slog.Info("sending announcement to tracker", "event", event)
-	downloaded, uploaded, left := snapshotFn()
-	receivedPeers, interval, err := m.tracker.Announce(ctx, event, downloaded, uploaded, left)
+	snapshot := snapshotFn()
+	receivedPeers, interval, err := m.tracker.Announce(ctx, event, snapshot.Downloaded, snapshot.Uploaded, snapshot.Left)
 	if err != nil {
 		return nil, 0, err
 	}

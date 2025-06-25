@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danferreira/gtorrent/internal/peer"
+	"github.com/danferreira/gtorrent/internal/state"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -54,8 +55,8 @@ func TestRun(t *testing.T) {
 		interval: 1,
 	}
 
-	snapshotFn := func() (int64, int64, int64) {
-		return 0, 0, 100
+	snapshotFn := func() state.Stats {
+		return state.Stats{Downloaded: 0, Uploaded: 0, Left: 100}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()

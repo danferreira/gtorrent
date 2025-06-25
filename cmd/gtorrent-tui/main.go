@@ -204,8 +204,8 @@ func (m model) stopTorrent(t *torrent.TorrentInfo) tea.Cmd {
 func (m *model) updateRows() {
 	rows := make([]table.Row, 0, len(m.torrents))
 	for i, ti := range m.torrents {
-		d, _, _ := ti.State.Snapshot()
-		pct := float64(d) / float64(ti.Metadata.Info.TotalLength()) * 100
+		s := ti.State.Snapshot()
+		pct := float64(s.Downloaded) / float64(ti.Metadata.Info.TotalLength()) * 100
 		rows = append(rows, table.Row{
 			fmt.Sprint(i + 1),
 			ti.Metadata.Info.Name,

@@ -30,17 +30,22 @@ func (s Status) String() string {
 	return ""
 }
 
+type Stats struct {
+	Downloaded int64
+	Uploaded   int64
+	Left       int64
+}
+
 type State struct {
 	mu       sync.RWMutex
 	Bitfield bitfield.Bitfield
 
 	status Status
 
-	peers      int
-	downloaded int64
-	uploaded   int64
-	size       int64
-	Left       int64
+	peers int
+	size  int64
+
+	Stats Stats
 }
 
 func NewState(m *metadata.Metadata, storage io.ReaderAt) *State {
@@ -80,11 +85,13 @@ func NewState(m *metadata.Metadata, storage io.ReaderAt) *State {
 
 	return &State{
 		Bitfield: bitfield,
-
-		downloaded: downloaded,
-		uploaded:   uploaded,
-		Left:       left,
+		Stats: Stats{
+			Downloaded: downloaded,
+			Uploaded:   uploaded,
+			Left:       left,
+		},
 	}
+
 }
 
 func (s *State) GetBitfield() bitfield.Bitfield {
@@ -103,26 +110,29 @@ func (s *State) SetPieceCompleted(index int, dataSize int) {
 
 	if !s.Bitfield.HasPiece(index) {
 		s.Bitfield.SetPiece(index)
-		s.downloaded += int64(dataSize)
-		s.Left -= int64(dataSize)
+
+		s.Stats.Downloaded += int64(dataSize)
+		s.Stats.Left -= int64(dataSize)
 	}
 }
 
 func (s *State) IsCompleted() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.Left == 0
+	return s.Stats.Left == 0
 }
 
-func (s *State) Snapshot() (int64, int64, int64) {
+func (s *State) Snapshot() Stats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.downloaded, s.uploaded, s.Left
+
+	return s.Stats
 }
 
 func (s *State) Status() Status {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	return s.status
 }
 
