@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/filepicker"
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -33,6 +35,8 @@ const (
 
 type model struct {
 	table      table.Model
+	help       help.Model
+	keyMap     keyMap
 	filepicker filepicker.Model
 	uiMode     mode
 	quitting   bool
@@ -41,6 +45,13 @@ type model struct {
 	client *torrent.Client
 
 	torrents []*torrent.TorrentInfo
+}
+
+type keyMap struct {
+	open  key.Binding
+	start key.Binding
+	stop  key.Binding
+	quit  key.Binding
 }
 
 type newTorrentMsg struct {
@@ -60,6 +71,12 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if wm, ok := msg.(tea.WindowSizeMsg); ok {
+		// If we set a width on the help menu it can gracefully truncate
+		// its view as needed.
+		m.help.Width = wm.Width
+	}
+
 	switch m.uiMode {
 	case modePickFile:
 		return m.updatePicker(msg)
@@ -68,30 +85,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m model) View() string {
-	if m.quitting {
-		return ""
-	}
-
-	if m.uiMode == modePickFile {
-		return "Open torrent:" + " " + m.filepicker.CurrentDirectory + "\n\n" + m.filepicker.View() + "\n"
-	}
-
-	infoBox := m.updateInfoBox()
-
-	return lipgloss.JoinVertical(lipgloss.Left, tableStyle.Render(m.table.View()), infoBox,
-		helpStyle("\no: open • r: resume • s: stop • d: delete • q: quit\n"))
-}
-
 func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
+		switch {
+		case key.Matches(msg, m.keyMap.quit):
 			m.quitting = true
 			return m, tea.Quit
 
-		case "r":
+		case key.Matches(msg, m.keyMap.start):
 			selectedTorrent := m.selectedTorrent()
 			if selectedTorrent != nil {
 				return m, m.startTorrent(selectedTorrent)
@@ -99,7 +101,7 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			return m, nil
 
-		case "s":
+		case key.Matches(msg, m.keyMap.stop):
 			selectedTorrent := m.selectedTorrent()
 			if selectedTorrent != nil {
 				return m, m.stopTorrent(selectedTorrent)
@@ -107,7 +109,7 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			return m, nil
 
-		case "o":
+		case key.Matches(msg, m.keyMap.open):
 			m.uiMode = modePickFile
 			return m, m.filepicker.Init()
 		}
@@ -128,9 +130,8 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
-		case "ctrl+c", "esc", "q":
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		if key.Matches(msg, m.keyMap.quit) {
 			m.uiMode = modeMain
 			return m, nil
 		}
@@ -160,10 +161,29 @@ func (m model) addTorrent(path string) tea.Cmd {
 			return errMsg{err}
 		}
 
-		return newTorrentMsg{
-			t: t,
-		}
+		return newTorrentMsg{t}
 	}
+}
+
+func (m model) View() string {
+	if m.quitting {
+		return ""
+	}
+
+	if m.uiMode == modePickFile {
+		return "Open torrent:" + " " + m.filepicker.CurrentDirectory + "\n\n" + m.filepicker.View() + "\n"
+	}
+
+	helpView := m.help.ShortHelpView([]key.Binding{
+		m.keyMap.open,
+		m.keyMap.start,
+		m.keyMap.stop,
+		m.keyMap.quit,
+	})
+
+	infoBox := m.updateInfoBox()
+
+	return lipgloss.JoinVertical(lipgloss.Left, tableStyle.Render(m.table.View()), infoBox, helpView)
 }
 
 func (m model) startTorrent(t *torrent.TorrentInfo) tea.Cmd {
@@ -285,7 +305,27 @@ func main() {
 		ListenPort: 6881,
 	})
 
-	m := model{filepicker: fp, table: t, client: c}
+	m := model{filepicker: fp, table: t, client: c,
+		keyMap: keyMap{
+			open: key.NewBinding(
+				key.WithKeys("o"),
+				key.WithHelp("o", "open"),
+			),
+			start: key.NewBinding(
+				key.WithKeys("r"),
+				key.WithHelp("r", "resume"),
+			),
+			stop: key.NewBinding(
+				key.WithKeys("s"),
+				key.WithHelp("s", "stop"),
+			),
+			quit: key.NewBinding(
+				key.WithKeys("q", "ctrl+c"),
+				key.WithHelp("q", "quit"),
+			),
+		},
+		help: help.New(),
+	}
 
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Println("Error running program:", err)
