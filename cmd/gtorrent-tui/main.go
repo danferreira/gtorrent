@@ -72,9 +72,8 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if wm, ok := msg.(tea.WindowSizeMsg); ok {
-		// If we set a width on the help menu it can gracefully truncate
-		// its view as needed.
 		m.help.Width = wm.Width
+		m.filepicker, _ = m.filepicker.Update(msg)
 	}
 
 	switch m.uiMode {
