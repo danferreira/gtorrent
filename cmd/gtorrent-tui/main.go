@@ -255,6 +255,9 @@ func configurePicker() filepicker.Model {
 	fp := filepicker.New()
 	fp.AllowedTypes = []string{".torrent"}
 
+	fp.ShowSize = false
+	fp.ShowPermissions = false
+
 	return fp
 }
 
@@ -301,7 +304,8 @@ func main() {
 	t := configureTable()
 
 	c := torrent.NewClient(torrent.Config{
-		ListenPort: 6881,
+		ListenPort:        6881,
+		MaxActiveTorrents: 1,
 	})
 
 	m := model{filepicker: fp, table: t, client: c,

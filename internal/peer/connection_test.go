@@ -18,8 +18,8 @@ import (
 )
 
 var (
-	InfoHash = [20]byte{0x01, 0x02, 0x03} // truncated for brevity
-	PeerID   = [20]byte{0x99, 0x88, 0x77} // truncated for brevity
+	InfoHash   = [20]byte{0x01, 0x02, 0x03} // truncated for brevity
+	MockPeerID = [20]byte{0x99, 0x88, 0x77} // truncated for brevity
 )
 
 func TestDial(t *testing.T) {
@@ -36,7 +36,7 @@ func TestDial(t *testing.T) {
 		ch, err := handshake.Read(conn)
 		require.NoError(t, err)
 		require.Equal(t, InfoHash, ch.InfoHash)
-		require.Equal(t, PeerID, ch.PeerID)
+		require.Equal(t, MockPeerID, ch.PeerID)
 
 		ph := handshake.Handshake{
 			InfoHash: InfoHash,
@@ -59,7 +59,7 @@ func TestDial(t *testing.T) {
 	}
 
 	c := newConnection(&peer, 16384, bitfield.Bitfield{}, &storage.Storage{})
-	err = c.dial(InfoHash, PeerID)
+	err = c.dial(InfoHash, MockPeerID)
 
 	assert.NoError(t, err)
 	assert.Equal(t, &peer, c.peer)
@@ -75,7 +75,7 @@ func TestDialTimeout(t *testing.T) {
 	c := newConnection(&peer, 16384, bitfield.Bitfield{}, &storage.Storage{})
 	c.config.DialTimeout = 200 * time.Millisecond
 
-	err := c.dial(InfoHash, PeerID)
+	err := c.dial(InfoHash, MockPeerID)
 	duration := time.Since(start)
 
 	assert.Error(t, err)
@@ -95,7 +95,7 @@ func TestAccept(t *testing.T) {
 		h, err := handshake.Read(client)
 		require.NoError(t, err)
 		assert.Equal(t, InfoHash, h.InfoHash)
-		assert.Equal(t, PeerID, h.PeerID)
+		assert.Equal(t, MockPeerID, h.PeerID)
 
 		// Receive bitfield
 		msg, err := message.Read(client)
@@ -106,7 +106,7 @@ func TestAccept(t *testing.T) {
 	}()
 
 	c := newConnection(&peer, 16384, bitfield.Bitfield{0b00000000}, &storage.Storage{})
-	err := c.accept(server, InfoHash, PeerID)
+	err := c.accept(server, InfoHash, MockPeerID)
 	require.NoError(t, err)
 
 	<-done
@@ -502,7 +502,7 @@ func TestConnection_DownloadFlow(t *testing.T) {
 		ch, err := handshake.Read(server)
 		require.NoError(t, err)
 		require.Equal(t, InfoHash, ch.InfoHash)
-		require.Equal(t, PeerID, ch.PeerID)
+		require.Equal(t, MockPeerID, ch.PeerID)
 
 		// ─ Receive bitfield ─
 		msg, err := message.Read(server)
@@ -542,7 +542,7 @@ func TestConnection_DownloadFlow(t *testing.T) {
 
 	stor := newMemStorage(pieceLen)
 	pc := newConnection(&Peer{Addr: "pipe"}, pieceLen, bitfield.Bitfield{0b00000000}, stor)
-	err := pc.accept(client, InfoHash, PeerID)
+	err := pc.accept(client, InfoHash, MockPeerID)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -611,7 +611,7 @@ func TestConnection_UploadFlow(t *testing.T) {
 	ownBF := bitfield.Bitfield{0b10000000}
 
 	pc := newConnection(&Peer{Addr: "pipe"}, pieceLen, ownBF, stor)
-	err := pc.accept(client, InfoHash, PeerID)
+	err := pc.accept(client, InfoHash, MockPeerID)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)

@@ -56,7 +56,7 @@ func TestInboundConnection(t *testing.T) {
 	}
 	pool := NewPool(1)
 	state := &state.State{Bitfield: bitfield.Bitfield{0b11100000}, Stats: state.Stats{Left: 1000}}
-	manager := NewManager(m, state, PeerID, pool, &storage.Storage{})
+	manager := NewManager(m, state, MockPeerID, pool, &storage.Storage{})
 
 	// Set up channels
 	workChan := make(chan *piece.PieceWork, 10)
@@ -103,7 +103,7 @@ func TestOutboundConnection(t *testing.T) {
 	pool := NewPool(1)
 	pool.PushMany([]Peer{peer})
 
-	manager := NewManager(m, &state.State{Bitfield: bitfield.Bitfield{0b11100000}, Stats: state.Stats{Left: 1000}}, PeerID, pool, &storage.Storage{})
+	manager := NewManager(m, &state.State{Bitfield: bitfield.Bitfield{0b11100000}, Stats: state.Stats{Left: 1000}}, MockPeerID, pool, &storage.Storage{})
 	manager.poolInterval = 100 * time.Millisecond
 
 	// Set up channels

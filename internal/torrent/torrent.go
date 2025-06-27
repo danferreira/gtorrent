@@ -21,7 +21,7 @@ type Torrent struct {
 	mu sync.Mutex
 
 	metadata *metadata.Metadata
-	peerID   [20]byte
+	peerID   peer.PeerID
 
 	inboundConnections chan net.Conn
 
@@ -40,7 +40,7 @@ type Torrent struct {
 	cancel context.CancelFunc
 }
 
-func NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (*Torrent, error) {
+func NewTorrent(m *metadata.Metadata, peerID peer.PeerID, listenPort int) (*Torrent, error) {
 	pool := peer.NewPool(10)
 	trackerManager := tracker.NewManager(tracker.NewTracker(m, peerID, listenPort), pool)
 
@@ -83,6 +83,8 @@ func (t *Torrent) Start(parent context.Context) {
 	go t.pieceCompleter.Run(t.ctx, failChan, resultChan)
 
 	t.state.SetStatus(state.Downloading)
+
+	<-t.ctx.Done()
 }
 
 func (t *Torrent) Stop() {

@@ -2,21 +2,19 @@ package torrent
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"sync"
 
 	"github.com/danferreira/gtorrent/internal/handshake"
 	"github.com/danferreira/gtorrent/internal/metadata"
+	"github.com/danferreira/gtorrent/internal/peer"
 	"github.com/danferreira/gtorrent/internal/state"
 )
 
 type TorrentFactory interface {
-	NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (TorrentRunner, error)
+	NewTorrent(m *metadata.Metadata, peerID peer.PeerID, listenPort int) (TorrentRunner, error)
 }
 
 type TorrentRunner interface {
@@ -27,12 +25,13 @@ type TorrentRunner interface {
 
 type DefaultTorrentFactory struct{}
 
-func (d DefaultTorrentFactory) NewTorrent(m *metadata.Metadata, peerID [20]byte, listenPort int) (TorrentRunner, error) {
+func (d DefaultTorrentFactory) NewTorrent(m *metadata.Metadata, peerID peer.PeerID, listenPort int) (TorrentRunner, error) {
 	return NewTorrent(m, peerID, listenPort)
 }
 
 type Config struct {
-	ListenPort int
+	MaxActiveTorrents int
+	ListenPort        int
 }
 
 type Client struct {
@@ -40,18 +39,16 @@ type Client struct {
 
 	config Config
 
-	peerID [20]byte
+	peerID peer.PeerID
 
 	torrentFactory TorrentFactory
 	torrents       map[[20]byte]TorrentRunner
 
 	ctx    context.Context
 	cancel context.CancelFunc
-}
 
-var (
-	NewTorrentFactory = NewTorrent
-)
+	activeTorrents chan struct{}
+}
 
 func NewClient(config Config) *Client {
 	return NewClientWithDeps(DefaultTorrentFactory{}, config)
@@ -64,9 +61,11 @@ func NewClientWithDeps(factory TorrentFactory, config Config) *Client {
 		config:         config,
 		torrentFactory: factory,
 		torrents:       make(map[[20]byte]TorrentRunner),
-		peerID:         generatePeerID(),
+		peerID:         peer.NewPeerID(),
 		ctx:            ctx,
 		cancel:         cancel,
+
+		activeTorrents: make(chan struct{}, config.MaxActiveTorrents),
 	}
 
 	return e
@@ -112,7 +111,16 @@ func (c *Client) StartTorrent(infoHash [20]byte) error {
 		return fmt.Errorf("torrent not found")
 	}
 
-	entry.Start(c.ctx)
+	go func() {
+		select {
+		case c.activeTorrents <- struct{}{}:
+			entry.Start(c.ctx)
+			<-c.activeTorrents
+		case <-c.ctx.Done():
+			return
+		}
+
+	}()
 
 	return nil
 }
@@ -127,7 +135,14 @@ func (c *Client) StopTorrent(infoHash [20]byte) error {
 		return fmt.Errorf("torrent not found")
 	}
 
-	entry.Stop()
+	if entry.State().Status() != state.Downloading {
+		return nil
+	}
+
+	go func() {
+		entry.Stop()
+		<-c.activeTorrents
+	}()
 
 	return nil
 }
@@ -194,19 +209,24 @@ func (c *Client) handleInboundConnection(conn net.Conn) error {
 	return nil
 }
 
-func generatePeerID() [20]byte {
-	const prefix = "-GT0001-"
-	var id [20]byte
-	copy(id[:], prefix)
-
-	// 12 random bytes -> 24 hex chars, but we need 12 *ASCII* bytes.
-	var tail [12]byte
-	if _, err := rand.Read(tail[:]); err != nil {
-		log.Fatal(err) // rand failure is unrecoverable here
+func (c *Client) ActiveTorrents() int {
+	var active int
+	for _, t := range c.torrents {
+		if t.State().Status() == state.Downloading {
+			active++
+		}
 	}
 
-	// Encode to printable ASCII using hex (2 chars per byte) and take first 12.
-	hex.Encode(id[8:], tail[:6]) // 6 bytes * 2 hex chars = 12 ASCII bytes
+	return active
+}
 
-	return id
+func (c *Client) QueuedTorrents() int {
+	var queued int
+	for _, t := range c.torrents {
+		if t.State().Status() == state.Queued {
+			queued++
+		}
+	}
+
+	return queued
 }

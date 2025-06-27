@@ -15,12 +15,15 @@ import (
 type Status uint8
 
 const (
+	Queued  Status = iota
 	Stopped Status = iota
 	Downloading
 )
 
 func (s Status) String() string {
 	switch s {
+	case Queued:
+		return "Queued"
 	case Stopped:
 		return "Stopped"
 	case Downloading:
