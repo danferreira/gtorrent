@@ -12,6 +12,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danferreira/gtorrent/internal/bitfield"
@@ -21,7 +22,6 @@ import (
 )
 
 const BlockSize = 16 * 1024 // 16 KB
-const MaxRequests = 30
 
 type pieceBlock struct {
 	index  int
@@ -59,18 +59,20 @@ func (p *pendingPiece) getData() []byte {
 }
 
 type ConnectionConfig struct {
-	DialTimeout       time.Duration
-	ReadTimeout       time.Duration
-	WriteTimeout      time.Duration
-	KeepAliveInterval time.Duration
+	ReadTimeout           time.Duration
+	WriteTimeout          time.Duration
+	KeepAliveInterval     time.Duration
+	CheckTimeoutsInterval time.Duration
+	MaxRequests           int
 }
 
 func NewDefaultConnectionConfig() ConnectionConfig {
 	return ConnectionConfig{
-		DialTimeout:       5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		KeepAliveInterval: 2 * time.Minute,
+		ReadTimeout:           10 * time.Second,
+		WriteTimeout:          10 * time.Second,
+		KeepAliveInterval:     2 * time.Minute,
+		CheckTimeoutsInterval: 30 * time.Second,
+		MaxRequests:           30,
 	}
 }
 
@@ -78,17 +80,17 @@ type Connection struct {
 	mu      sync.Mutex
 	conn    net.Conn
 	peer    *Peer
-	storage Storage
+	storage io.ReaderAt
 
 	logger *slog.Logger
 
 	config ConnectionConfig
 
-	bitfieldReceived bool
-	amChoking        bool
-	amInterested     bool
-	peerChoking      bool
-	peerInterested   bool
+	bitfieldReceived atomic.Bool
+	amChoking        atomic.Bool
+	amInterested     atomic.Bool
+	peerChoking      atomic.Bool
+	peerInterested   atomic.Bool
 
 	peerBitfield bitfield.Bitfield
 	ownBitfield  bitfield.Bitfield
@@ -97,8 +99,9 @@ type Connection struct {
 	workRequested chan struct{} // Signal when ready for work
 
 	pieceLength      int
-	inflightRequests int
-	pendingPieces    map[int]*pendingPiece
+	inflightRequests atomic.Int32
+
+	pendingPieces map[int]*pendingPiece
 
 	done chan struct{}
 
@@ -107,21 +110,13 @@ type Connection struct {
 	closeOnce sync.Once
 }
 
-type Storage interface {
-	ReadAt(buf []byte, start int64) (int, error)
-	WriteAt(data []byte, start int64) (int, error)
-}
-
-func newConnection(p *Peer, pieceLen int, bf bitfield.Bitfield, storage Storage) *Connection {
-	return &Connection{
+func newConnection(p *Peer, pieceLen int, bf bitfield.Bitfield, storage io.ReaderAt) *Connection {
+	conn := &Connection{
 		peer: p,
 
 		logger: slog.With("peer", p.Addr),
 
 		config: NewDefaultConnectionConfig(),
-
-		amChoking:   true,
-		peerChoking: true,
 
 		ownBitfield: bf,
 		pieceLength: pieceLen,
@@ -133,10 +128,15 @@ func newConnection(p *Peer, pieceLen int, bf bitfield.Bitfield, storage Storage)
 		pendingPieces: make(map[int]*pendingPiece),
 		done:          make(chan struct{}),
 	}
+
+	conn.amChoking.Store(true)
+	conn.peerChoking.Store(true)
+	return conn
 }
 
-func (c *Connection) dial(infoHash, peerID [20]byte) error {
-	conn, err := net.DialTimeout("tcp4", c.peer.Addr, c.config.DialTimeout)
+func (c *Connection) dial(ctx context.Context, infoHash, peerID [20]byte) error {
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "tcp", c.peer.Addr)
 	if err != nil {
 		return err
 	}
@@ -187,12 +187,25 @@ func (c *Connection) start(ctx context.Context, workChan <-chan *piece.PieceWork
 		c.closeGracefully()
 	}()
 
-	go c.messageReader(ctx, downloadedChan)
-	go c.messageWriter(ctx, workChan, failChan)
-	go c.keepAliveLoop(ctx)
+	go c.messageReaderWorker(ctx, downloadedChan)
+	go c.messageWriterWorker(ctx)
+	go c.requestPiecesWorker(ctx, workChan, failChan)
 }
 
-func (c *Connection) messageReader(ctx context.Context, done chan<- *piece.PieceDownloaded) {
+func (c *Connection) startSeeding(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+
+	go func() {
+		<-ctx.Done()
+		c.closeGracefully()
+	}()
+
+	go c.messageReaderWorker(ctx, nil)
+	go c.messageWriterWorker(ctx)
+}
+
+func (c *Connection) messageReaderWorker(ctx context.Context, downloadedChan chan<- *piece.PieceDownloaded) {
 	c.logger.Debug("starting message reader")
 
 	for {
@@ -208,7 +221,7 @@ func (c *Connection) messageReader(ctx context.Context, done chan<- *piece.Piece
 
 			msg, err := message.Read(c.conn)
 			if err != nil {
-				if c.isConnectionClosed(err) {
+				if isConnectionClosed(err) {
 					c.logger.Info("connection closed")
 				} else {
 					c.logger.Error("failed to read message", "error", err)
@@ -218,9 +231,13 @@ func (c *Connection) messageReader(ctx context.Context, done chan<- *piece.Piece
 				return
 			}
 
-			c.conn.SetReadDeadline(time.Time{})
+			if err := c.conn.SetReadDeadline(time.Time{}); err != nil {
+				c.logger.Error("error reseting read deadline", "error", err)
+				c.closeGracefully()
+				return
+			}
 
-			if err := c.handleMessage(msg, done); err != nil {
+			if err := c.handleMessage(msg, downloadedChan); err != nil {
 				c.logger.Error("failed to handle message", "error", err)
 				c.closeGracefully()
 				return
@@ -229,11 +246,37 @@ func (c *Connection) messageReader(ctx context.Context, done chan<- *piece.Piece
 	}
 }
 
-func (c *Connection) messageWriter(ctx context.Context, work <-chan *piece.PieceWork, fail chan<- *piece.PieceWork) {
+func (c *Connection) messageWriterWorker(ctx context.Context) {
 	c.logger.Debug("starting message writer")
 
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-c.outgoing:
+			// Discard request messages if peer is choking us
+			if msg != nil && msg.ID == message.MessageRequest && c.peerChoking.Load() {
+				continue
+			}
+
+			if err := c.writeMessage(msg); err != nil {
+				c.logger.Error("failed to write message", "error", err)
+				return
+			}
+		case <-ticker.C:
+			c.sendMessage(nil)
+		}
+	}
+}
+
+func (c *Connection) requestPiecesWorker(ctx context.Context, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork) {
+	c.logger.Info("starting request pieces worker")
+
 	idle := time.NewTimer(1 * time.Second)
-	timeout := time.NewTimer(30 * time.Second) // Check for timeouts every 30s
+	timeout := time.NewTimer(c.config.CheckTimeoutsInterval) // Check for timeouts every 30s
 	defer idle.Stop()
 	defer timeout.Stop()
 
@@ -243,17 +286,16 @@ func (c *Connection) messageWriter(ctx context.Context, work <-chan *piece.Piece
 		select {
 		case <-ctx.Done():
 			return
-		case msg := <-c.outgoing:
-			if err := c.writeMessage(msg); err != nil {
-				c.logger.Error("failed to write message", "error", err)
-				return
-			}
 
 		case <-c.workRequested:
 			if c.canRequest() {
 				select {
-				case pw := <-work:
-					c.processPieceRequest(pw, fail)
+				case pw, ok := <-workChan:
+					if !ok { // channel has been closed → download finished
+						return // exit the worker
+					}
+
+					c.processPieceRequest(pw, failChan)
 				default:
 					idle.Reset(1 * time.Second)
 				}
@@ -266,24 +308,8 @@ func (c *Connection) messageWriter(ctx context.Context, work <-chan *piece.Piece
 			idle.Reset(1 * time.Second)
 
 		case <-timeout.C:
-			c.checkTimeouts(fail)
-			timeout.Reset(30 * time.Second)
-		}
-	}
-}
-
-func (c *Connection) keepAliveLoop(ctx context.Context) {
-	c.logger.Debug("starting keep alive loop")
-
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.sendMessage(nil)
+			c.checkTimeouts(failChan)
+			timeout.Reset(c.config.CheckTimeoutsInterval)
 		}
 	}
 }
@@ -296,7 +322,10 @@ func (c *Connection) requestWork() {
 }
 
 func (c *Connection) canRequest() bool {
-	return !c.peerChoking && c.amInterested && c.inflightRequests < MaxRequests
+	inflightRequests := int(c.inflightRequests.Load())
+	peerChoking := c.peerChoking.Load()
+	amInterested := c.amInterested.Load()
+	return !peerChoking && amInterested && inflightRequests < c.config.MaxRequests
 }
 
 func (c *Connection) processPieceRequest(pw *piece.PieceWork, fail chan<- *piece.PieceWork) {
@@ -327,11 +356,11 @@ func (c *Connection) processPieceRequest(pw *piece.PieceWork, fail chan<- *piece
 		m := message.NewRequest(pw.Index, offset, blockSize)
 		c.sendMessage(&m)
 
-		c.inflightRequests++
+		c.inflightRequests.Add(1)
 	}
 }
 
-func (c *Connection) handleMessage(m *message.Message, done chan<- *piece.PieceDownloaded) error {
+func (c *Connection) handleMessage(m *message.Message, downloadedChan chan<- *piece.PieceDownloaded) error {
 	if m == nil {
 		c.logger.Debug("keep alive")
 		return nil
@@ -363,10 +392,9 @@ func (c *Connection) handleMessage(m *message.Message, done chan<- *piece.PieceD
 		}
 
 		return c.handleRequest(request)
-
 	case message.MessagePiece:
 		piece := m.AsPiece()
-		return c.handlePiece(piece, done)
+		return c.handlePiece(piece, downloadedChan)
 	case message.MessageCancel:
 		c.logger.Debug("peer wants to cancel")
 	default:
@@ -378,40 +406,40 @@ func (c *Connection) handleMessage(m *message.Message, done chan<- *piece.PieceD
 
 func (c *Connection) handleChoke() {
 	c.logger.Debug("peer choked us")
-	c.peerChoking = true
-	c.inflightRequests = 0
+	c.peerChoking.Store(true)
+	c.inflightRequests.Store(0)
 }
 
 func (c *Connection) handleUnchoke() {
 	c.logger.Info("peer unchoked us")
-	c.peerChoking = false
-	c.inflightRequests = 0
+	c.peerChoking.Store(false)
+	c.inflightRequests.Store(0)
+	amInterested := c.amInterested.Load()
 
-	// Now we can request work
-	if c.amInterested {
+	if amInterested {
 		c.requestWork()
 	}
 }
 
 func (c *Connection) handleInterested() error {
-	c.logger.Debug("peer is interested in us")
-	c.peerInterested = true
+	c.logger.Info("peer is interested in us")
+	c.peerInterested.Store(true)
 
-	if c.amChoking {
+	if c.amChoking.Load() {
 		m := &message.Message{
 			ID: message.MessageUnchoke,
 		}
 		c.sendMessage(m)
 	}
 
-	c.amChoking = false
+	c.amChoking.Store(false)
 
 	return nil
 }
 
 func (c *Connection) handleNotInterested() {
 	c.logger.Debug("peer is not interested")
-	c.peerInterested = false
+	c.peerInterested.Store(false)
 }
 
 func (c *Connection) handleHave(index int) error {
@@ -419,7 +447,7 @@ func (c *Connection) handleHave(index int) error {
 
 	c.peerBitfield.SetPiece(index)
 
-	if !c.peerInterested && !c.ownBitfield.HasPiece(index) {
+	if !c.peerInterested.Load() && !c.ownBitfield.HasPiece(index) {
 		m := &message.Message{
 			ID: message.MessageInterested,
 		}
@@ -432,11 +460,11 @@ func (c *Connection) handleHave(index int) error {
 func (c *Connection) handleBitfield(bf bitfield.Bitfield) error {
 	c.logger.Info("received bitfield from peer")
 
-	if c.bitfieldReceived {
+	if c.bitfieldReceived.Load() {
 		return errors.New("received duplicate bitfield")
 	}
 
-	c.bitfieldReceived = true
+	c.bitfieldReceived.Store(true)
 	c.peerBitfield = bf
 
 	shouldBeInterested := false
@@ -452,7 +480,7 @@ func (c *Connection) handleBitfield(bf bitfield.Bitfield) error {
 			ID: message.MessageInterested,
 		})
 
-		c.amInterested = true
+		c.amInterested.Store(true)
 	}
 
 	return nil
@@ -461,7 +489,7 @@ func (c *Connection) handleBitfield(bf bitfield.Bitfield) error {
 func (c *Connection) handleRequest(req *message.RequestPayload) error {
 	c.logger.Debug("peer asked for a piece", "index", req.Index)
 
-	if c.amChoking {
+	if c.amChoking.Load() {
 		c.logger.Debug("ignoring request from choked peer")
 		return nil
 	}
@@ -483,8 +511,13 @@ func (c *Connection) handleRequest(req *message.RequestPayload) error {
 	return nil
 }
 
-func (c *Connection) handlePiece(p *message.PiecePayload, done chan<- *piece.PieceDownloaded) error {
+func (c *Connection) handlePiece(p *message.PiecePayload, downloadedChan chan<- *piece.PieceDownloaded) error {
 	c.logger.Debug("received piece block", "index", p.Index)
+
+	if downloadedChan == nil {
+		c.logger.Debug("ignoring in seeding mode", "index", p.Index)
+		return nil
+	}
 
 	pendingPiece := c.pendingPieces[int(p.Index)]
 	if pendingPiece == nil {
@@ -498,7 +531,7 @@ func (c *Connection) handlePiece(p *message.PiecePayload, done chan<- *piece.Pie
 		data:   p.Data,
 	})
 
-	c.inflightRequests--
+	c.inflightRequests.Add(-1)
 
 	if pendingPiece.isComplete() {
 		// we have all blocks for this piece
@@ -509,13 +542,30 @@ func (c *Connection) handlePiece(p *message.PiecePayload, done chan<- *piece.Pie
 		c.deletePendingPiece(int(p.Index))
 
 		// send downloaded piece to channel
-		done <- &piece.PieceDownloaded{
+		downloadedChan <- &piece.PieceDownloaded{
 			Index: int(p.Index),
 			Data:  completeData,
 			PW:    pw,
 		}
 
 		c.requestWork()
+	}
+
+	return nil
+}
+
+func (c *Connection) sendBitfield() error {
+	if c.ownBitfield == nil {
+		return errors.New("no bitfield to send")
+	}
+
+	c.logger.Info("sending bitfield")
+
+	if err := c.writeMessage(&message.Message{
+		ID:      message.MessageBitfield,
+		Payload: c.ownBitfield,
+	}); err != nil {
+		return fmt.Errorf("bitfield not send %w", err)
 	}
 
 	return nil
@@ -540,43 +590,15 @@ func (c *Connection) sendMessage(msg *message.Message) {
 }
 
 func (c *Connection) writeMessage(msg *message.Message) error {
-	if err := c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteTimeout)); err != nil {
-		return fmt.Errorf("failed to set write deadline: %w", err)
-	}
-
+	c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteTimeout))
 	defer c.conn.SetWriteDeadline(time.Time{})
 
 	data := msg.Serialize()
 	if _, err := c.conn.Write(data); err != nil {
-		return fmt.Errorf("failed to write message: %w", err)
+		return err
 	}
 
 	return nil
-}
-
-func (c *Connection) sendBitfield() error {
-	if c.ownBitfield == nil {
-		return errors.New("no bitfield to send")
-	}
-
-	c.logger.Info("sending bitfield")
-
-	c.writeMessage(&message.Message{
-		ID:      message.MessageBitfield,
-		Payload: c.ownBitfield,
-	})
-
-	return nil
-}
-
-func (c *Connection) isConnectionClosed(err error) bool {
-	if err == io.EOF {
-		return true
-	}
-	if netErr, ok := err.(net.Error); ok {
-		return netErr.Timeout() || !netErr.Temporary()
-	}
-	return false
 }
 
 func (c *Connection) closeGracefully() {
@@ -589,9 +611,11 @@ func (c *Connection) closeGracefully() {
 }
 
 func (c *Connection) checkTimeouts(fail chan<- *piece.PieceWork) {
-	now := time.Now()
+	if fail == nil {
+		return
+	}
 	for index, pending := range c.pendingPieces {
-		if now.Sub(pending.timestamp) > 60*time.Second { // 60 second timeout
+		if time.Since(pending.timestamp) > 60*time.Second { // 60 second timeout
 			c.logger.Warn("piece request timed out", "index", index)
 
 			c.deletePendingPiece(index)
@@ -603,11 +627,13 @@ func (c *Connection) checkTimeouts(fail chan<- *piece.PieceWork) {
 		}
 	}
 }
+
 func (c *Connection) deletePendingPiece(index int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.pendingPieces, index)
 }
+
 func sendHandshake(conn net.Conn, infoHash, peerID [20]byte) error {
 	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return fmt.Errorf("failed to set write deadline: %w", err)
@@ -640,4 +666,14 @@ func receiveHandshake(conn net.Conn, infoHash [20]byte) error {
 	}
 
 	return nil
+}
+
+func isConnectionClosed(err error) bool {
+	if err == io.EOF {
+		return true
+	}
+	if netErr, ok := err.(net.Error); ok {
+		return netErr.Timeout()
+	}
+	return false
 }

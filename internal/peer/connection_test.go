@@ -3,6 +3,7 @@ package peer
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"testing"
@@ -58,13 +59,16 @@ func TestDial(t *testing.T) {
 		Addr: net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port)),
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
 	c := newConnection(&peer, 16384, bitfield.Bitfield{}, &storage.Storage{})
-	err = c.dial(InfoHash, MockPeerID)
+	err = c.dial(ctx, InfoHash, MockPeerID)
 
 	assert.NoError(t, err)
 	assert.Equal(t, &peer, c.peer)
-	assert.True(t, c.peerChoking)
-	assert.True(t, c.amChoking)
+	assert.True(t, c.peerChoking.Load())
+	assert.True(t, c.amChoking.Load())
 }
 
 func TestDialTimeout(t *testing.T) {
@@ -73,9 +77,10 @@ func TestDialTimeout(t *testing.T) {
 
 	start := time.Now()
 	c := newConnection(&peer, 16384, bitfield.Bitfield{}, &storage.Storage{})
-	c.config.DialTimeout = 200 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
 
-	err := c.dial(InfoHash, MockPeerID)
+	err := c.dial(ctx, InfoHash, MockPeerID)
 	duration := time.Since(start)
 
 	assert.Error(t, err)
@@ -117,18 +122,18 @@ func TestHandleChoke(t *testing.T) {
 
 	pc.handleChoke()
 
-	assert.True(t, pc.peerChoking)
-	assert.Equal(t, 0, pc.inflightRequests)
+	assert.True(t, pc.peerChoking.Load())
+	assert.Equal(t, int32(0), pc.inflightRequests.Load())
 }
 
 func TestHandleUnchoke(t *testing.T) {
 	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
-	pc.amInterested = true
+	pc.amInterested.Store(true)
 
 	pc.handleUnchoke()
 
-	assert.False(t, pc.peerChoking)
-	assert.Equal(t, 0, pc.inflightRequests)
+	assert.False(t, pc.peerChoking.Load())
+	assert.Equal(t, int32(0), pc.inflightRequests.Load())
 
 	// Should request work when unchoked and interested
 	select {
@@ -144,7 +149,7 @@ func TestHandleInterested(t *testing.T) {
 
 	pc.handleInterested()
 
-	assert.True(t, pc.peerInterested)
+	assert.True(t, pc.peerInterested.Load())
 
 	select {
 	case msg := <-pc.outgoing:
@@ -176,14 +181,14 @@ func TestHandleHave(t *testing.T) {
 
 func TestHandleBitfield(t *testing.T) {
 	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{0b00000000}, &storage.Storage{})
-	pc.peerChoking = false
+	pc.peerChoking.Store(false)
 	peerBf := bitfield.Bitfield{0b11111111}
 	err := pc.handleBitfield(peerBf)
 
 	assert.NoError(t, err)
-	assert.True(t, pc.bitfieldReceived)
+	assert.True(t, pc.bitfieldReceived.Load())
 	assert.Equal(t, peerBf, pc.peerBitfield)
-	assert.True(t, pc.amInterested)
+	assert.True(t, pc.amInterested.Load())
 
 	// Should send interested message
 	select {
@@ -195,7 +200,7 @@ func TestHandleBitfield(t *testing.T) {
 }
 func TestHandleBitfieldDuplicated(t *testing.T) {
 	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
-	pc.bitfieldReceived = true
+	pc.bitfieldReceived.Store(true)
 
 	bf := bitfield.Bitfield{0b11111111}
 	err := pc.handleBitfield(bf)
@@ -210,7 +215,7 @@ func TestHandlePiece(t *testing.T) {
 		Length: BlockSize * 2, // Two blocks
 	}
 	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
-	pc.inflightRequests = 2
+	pc.inflightRequests.Store(2)
 	// Add pending piece
 	pc.pendingPieces[0] = &pendingPiece{
 		pw:        pieceWork,
@@ -229,7 +234,7 @@ func TestHandlePiece(t *testing.T) {
 
 	err := pc.handlePiece(piece1, done)
 	assert.NoError(t, err)
-	assert.Equal(t, 1, pc.inflightRequests)
+	assert.Equal(t, int32(1), pc.inflightRequests.Load())
 
 	// Piece shouldn't be complete yet
 	select {
@@ -248,7 +253,7 @@ func TestHandlePiece(t *testing.T) {
 
 	err = pc.handlePiece(piece2, done)
 	assert.NoError(t, err)
-	assert.Equal(t, 0, pc.inflightRequests)
+	assert.Equal(t, int32(0), pc.inflightRequests.Load())
 
 	// Should have completed piece
 	select {
@@ -363,16 +368,16 @@ func TestCanRequest(t *testing.T) {
 		{"can request", false, true, 0, true},
 		{"choked", true, true, 0, false},
 		{"not interested", false, false, 0, false},
-		{"too many requests", false, true, MaxRequests, false},
+		{"too many requests", false, true, 30, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
 
-			pc.peerChoking = tt.peerChoking
-			pc.amInterested = tt.amInterested
-			pc.inflightRequests = tt.inflightRequests
+			pc.peerChoking.Store(tt.peerChoking)
+			pc.amInterested.Store(tt.amInterested)
+			pc.inflightRequests.Store(int32(tt.inflightRequests))
 
 			result := pc.canRequest()
 			assert.Equal(t, tt.expected, result)
@@ -396,7 +401,7 @@ func TestProcessPieceRequest(t *testing.T) {
 
 		// Should create pending piece
 		assert.NotNil(t, pc.pendingPieces[0])
-		assert.Equal(t, 1, pc.inflightRequests)
+		assert.Equal(t, int32(1), pc.inflightRequests.Load())
 
 		// Should send request message
 		select {
@@ -431,59 +436,52 @@ func TestProcessPieceRequest(t *testing.T) {
 	})
 }
 
-func TestCheckTimeouts(t *testing.T) {
-	pc := newConnection(&Peer{}, 16384, bitfield.Bitfield{}, &storage.Storage{})
+func TestWriteKeepAlive(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
 
-	// Add an old pending piece
-	oldPiece := &pendingPiece{
-		pw: &piece.PieceWork{
-			Index:  0,
-			Hash:   [20]byte{},
-			Length: BlockSize,
-		},
-		timestamp: time.Now().Add(-65 * time.Second), // 65 seconds ago
-	}
-	pc.pendingPieces[0] = oldPiece
+	pc := newConnection(&Peer{Addr: "pipe"}, BlockSize,
+		bitfield.Bitfield{}, bytes.NewReader(nil),
+	)
+	pc.conn = client
 
-	// Add a recent pending piece
-	recentPiece := &pendingPiece{
-		pw: &piece.PieceWork{
-			Index:  1,
-			Hash:   [20]byte{},
-			Length: BlockSize,
-		},
-		timestamp: time.Now().Add(-30 * time.Second), // 30 seconds ago
-	}
-	pc.pendingPieces[1] = recentPiece
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	go pc.messageWriterWorker(ctx)
 
-	failChan := make(chan *piece.PieceWork, 2)
-	pc.checkTimeouts(failChan)
+	// send keep-alive (nil message)
+	go pc.sendMessage(nil)
 
-	// Old piece should be timed out
-	assert.Nil(t, pc.pendingPieces[0])
-	assert.NotNil(t, pc.pendingPieces[1])
+	// expect exactly 4 zero bytes on the wire
+	b := make([]byte, 4)
+	_, err := io.ReadFull(server, b)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0, 0, 0, 0}, b)
+}
+
+func TestRequestWorkerTimeout(t *testing.T) {
+	workCh := make(chan *piece.PieceWork)
+	failCh := make(chan *piece.PieceWork, 1)
+
+	pc := newConnection(&Peer{}, BlockSize, nil, nil)
+	pc.config.CheckTimeoutsInterval = 100 * time.Millisecond
+
+	pw := &piece.PieceWork{Index: 0, Length: BlockSize}
+	pc.pendingPieces[0] = &pendingPiece{pw: pw, timestamp: time.Now().Add(-1 * time.Minute)}
+	pc.inflightRequests.Store(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	go pc.requestPiecesWorker(ctx, workCh, failCh)
 
 	select {
-	case failed := <-failChan:
-		assert.Equal(t, oldPiece.pw, failed)
-	default:
-		t.Error("Expected timed out piece to be sent to fail channel")
+	case got := <-failCh:
+		require.Equal(t, pw, got)
+	case <-ctx.Done():
+		t.Fatal("worker did not time out piece")
 	}
-}
-
-type memStorage struct {
-	data []byte
-}
-
-func newMemStorage(size int) *memStorage { return &memStorage{data: make([]byte, size)} }
-
-func (m *memStorage) ReadAt(p []byte, off int64) (int, error) {
-	copy(p, m.data[off:])
-	return len(p), nil
-}
-func (m *memStorage) WriteAt(p []byte, off int64) (int, error) {
-	copy(m.data[off:], p)
-	return len(p), nil
 }
 
 func TestConnection_DownloadFlow(t *testing.T) {
@@ -540,7 +538,7 @@ func TestConnection_DownloadFlow(t *testing.T) {
 		server.Write(pieceMsg.Serialize())
 	}()
 
-	stor := newMemStorage(pieceLen)
+	stor := bytes.NewReader([]byte{})
 	pc := newConnection(&Peer{Addr: "pipe"}, pieceLen, bitfield.Bitfield{0b00000000}, stor)
 	err := pc.accept(client, InfoHash, MockPeerID)
 	require.NoError(t, err)
@@ -552,10 +550,10 @@ func TestConnection_DownloadFlow(t *testing.T) {
 	failCh := make(chan *piece.PieceWork, 1)
 	doneCh := make(chan *piece.PieceDownloaded, 1)
 
-	pc.start(ctx, workCh, failCh, doneCh)
-
 	// queue one work item
 	workCh <- &piece.PieceWork{Index: 0, Length: pieceLen}
+
+	pc.start(ctx, workCh, failCh, doneCh)
 
 	select {
 	case got := <-doneCh:
@@ -582,7 +580,7 @@ func TestConnection_UploadFlow(t *testing.T) {
 
 		// read bitfield
 		_, err = message.Read(server)
-
+		require.NoError(t, err)
 		// send Interested
 		server.Write((&message.Message{ID: message.MessageInterested}).Serialize())
 
@@ -605,12 +603,12 @@ func TestConnection_UploadFlow(t *testing.T) {
 	}()
 
 	// storage returns payload
-	stor := newMemStorage(pieceLen)
-	copy(stor.data, payload)
+
+	stor := bytes.NewReader(payload)
 
 	ownBF := bitfield.Bitfield{0b10000000}
 
-	pc := newConnection(&Peer{Addr: "pipe"}, pieceLen, ownBF, stor)
+	pc := newConnection(&Peer{Addr: "pipe_up"}, pieceLen, ownBF, stor)
 	err := pc.accept(client, InfoHash, MockPeerID)
 	require.NoError(t, err)
 
