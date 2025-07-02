@@ -37,6 +37,11 @@ func (c *Completer) Run(ctx context.Context, failChan chan<- *PieceWork, resultC
 			c.state.SetPieceCompleted(p.Index, p.PW.Length)
 		case <-ctx.Done():
 			slog.Info("completer context done, shutting down")
+			err := c.storage.CloseFiles()
+			if err != nil {
+				slog.Error("error when closing files", "error", err)
+			}
+
 			return
 		}
 	}

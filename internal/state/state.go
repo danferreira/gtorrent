@@ -18,6 +18,7 @@ const (
 	Queued  Status = iota
 	Stopped Status = iota
 	Downloading
+	Seeding
 )
 
 func (s Status) String() string {
@@ -28,6 +29,8 @@ func (s Status) String() string {
 		return "Stopped"
 	case Downloading:
 		return "Downloading"
+	case Seeding:
+		return "Seeding"
 	}
 
 	return ""

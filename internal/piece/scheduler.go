@@ -86,11 +86,11 @@ func (s *Scheduler) Run(ctx context.Context) (<-chan *PieceWork, chan<- *PieceWo
 			}
 
 			select {
+			case <-ctx.Done():
+				return
 			case workChan <- pw:
 			case failed := <-failChan:
 				s.requeue(failed)
-			case <-ctx.Done():
-				return
 			}
 		}
 	}()

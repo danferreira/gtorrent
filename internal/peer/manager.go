@@ -14,7 +14,7 @@ import (
 )
 
 type Manager struct {
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	connectedPeers map[string]*Connection
 	infoHash       [20]byte
 	peerID         [20]byte
@@ -43,10 +43,10 @@ func NewManager(m *metadata.Metadata, state *state.State, peerID [20]byte, pool 
 }
 
 func (m *Manager) Run(ctx context.Context, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, inboundConnections <-chan net.Conn) <-chan *piece.PieceDownloaded {
-	resultChan := make(chan *piece.PieceDownloaded, 100) // buffered channel for results
+	downloadedChan := make(chan *piece.PieceDownloaded, 100) // buffered channel for results
 
 	if !m.state.IsCompleted() {
-		go m.outboundConnections(ctx, workChan, failChan, resultChan)
+		go m.outboundConnections(ctx, workChan, failChan, downloadedChan)
 	}
 
 	go func() {
@@ -56,20 +56,44 @@ func (m *Manager) Run(ctx context.Context, workChan <-chan *piece.PieceWork, fai
 				return
 			case c := <-inboundConnections:
 				go func() {
-					if err := m.inboundConnection(ctx, c, workChan, failChan, resultChan); err != nil {
+					pc, err := m.inboundConnection(c)
+					if err != nil {
 						slog.Error("an error occurred while accepting a peer connection", "error", err)
 						c.Close()
 					}
+
+					pc.start(ctx, workChan, failChan, downloadedChan)
 				}()
 			}
 		}
 	}()
 
-	return resultChan
+	return downloadedChan
+}
+
+func (m *Manager) RunSeeding(ctx context.Context, inboundConnections <-chan net.Conn) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case c := <-inboundConnections:
+			go func() {
+				pc, err := m.inboundConnection(c)
+				if err != nil {
+					slog.Error("an error occurred while accepting a peer connection", "error", err)
+					c.Close()
+				}
+
+				pc.startSeeding(ctx)
+			}()
+		}
+	}
+
 }
 
 func (m *Manager) outboundConnections(ctx context.Context, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, resultChan chan<- *piece.PieceDownloaded) {
 	ticker := time.NewTicker(m.poolInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -95,7 +119,7 @@ func (m *Manager) outboundConnections(ctx context.Context, workChan <-chan *piec
 
 func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, downloadedChan chan<- *piece.PieceDownloaded) {
 	c := newConnection(&p, m.pieceLength, m.state.GetBitfield(), m.storage)
-	if err := c.dial(m.infoHash, m.peerID); err != nil {
+	if err := c.dial(ctx, m.infoHash, m.peerID); err != nil {
 		slog.Error("error during connection", "error", err)
 		return
 	}
@@ -105,7 +129,7 @@ func (m *Manager) outboundConnection(ctx context.Context, p Peer, workChan <-cha
 	c.start(ctx, workChan, failChan, downloadedChan)
 }
 
-func (m *Manager) inboundConnection(ctx context.Context, conn net.Conn, workChan <-chan *piece.PieceWork, failChan chan<- *piece.PieceWork, downloadedChan chan<- *piece.PieceDownloaded) error {
+func (m *Manager) inboundConnection(conn net.Conn) (*Connection, error) {
 	slog.Info("new inbound connection", "addr", conn.RemoteAddr().String())
 	p := &Peer{
 		Addr: conn.RemoteAddr().String(),
@@ -113,21 +137,19 @@ func (m *Manager) inboundConnection(ctx context.Context, conn net.Conn, workChan
 
 	c := newConnection(p, m.pieceLength, m.state.GetBitfield(), m.storage)
 	if err := c.accept(conn, m.infoHash, m.peerID); err != nil {
-		return err
+		return nil, err
 	}
 
 	m.addConnectedPeer(c)
 
-	c.start(ctx, workChan, failChan, downloadedChan)
-
-	return nil
+	return c, nil
 }
 
 func (m *Manager) addConnectedPeer(pc *Connection) {
 	m.mu.Lock()
-	m.connectedPeers[pc.peer.Addr] = pc
-	m.mu.Unlock()
+	defer m.mu.Unlock()
 
+	m.connectedPeers[pc.peer.Addr] = pc
 	m.state.IncreasePeers()
 
 	go func() {
@@ -138,14 +160,14 @@ func (m *Manager) addConnectedPeer(pc *Connection) {
 
 func (m *Manager) removePeer(addr string) {
 	m.mu.Lock()
-	delete(m.connectedPeers, addr)
-	m.mu.Unlock()
+	defer m.mu.Unlock()
 
+	delete(m.connectedPeers, addr)
 	m.state.DecreasePeers()
 }
 
 func (m *Manager) countPeers() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return len(m.connectedPeers)
 }

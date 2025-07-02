@@ -78,11 +78,18 @@ func (t *Torrent) Start(parent context.Context) {
 	t.ctx, t.cancel = context.WithCancel(parent)
 
 	go t.trackerManager.Run(t.ctx, t.state.Snapshot)
-	workChan, failChan := t.pieceScheduler.Run(t.ctx)
-	resultChan := t.peerManager.Run(t.ctx, workChan, failChan, t.inboundConnections)
-	go t.pieceCompleter.Run(t.ctx, failChan, resultChan)
 
-	t.state.SetStatus(state.Downloading)
+	if t.state.IsCompleted() {
+		go t.peerManager.RunSeeding(t.ctx, t.inboundConnections)
+
+		t.state.SetStatus(state.Seeding)
+	} else {
+		workChan, failChan := t.pieceScheduler.Run(t.ctx)
+		resultChan := t.peerManager.Run(t.ctx, workChan, failChan, t.inboundConnections)
+		go t.pieceCompleter.Run(t.ctx, failChan, resultChan)
+
+		t.state.SetStatus(state.Downloading)
+	}
 
 	<-t.ctx.Done()
 }

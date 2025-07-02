@@ -122,7 +122,7 @@ func TestOutboundConnection(t *testing.T) {
 		defer conn.Close()
 
 		_, err = handshake.Read(conn)
-
+		require.NoError(t, err)
 		ch := handshake.Handshake{
 			InfoHash: InfoHash,
 			PeerID:   [20]byte{0x66, 0x55, 0x44},
